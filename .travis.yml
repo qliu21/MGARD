@@ -9,7 +9,7 @@ before_install:
   - pushd ${HOME}
   - wget http://releases.llvm.org/7.0.1/clang+llvm-7.0.1-x86_64-linux-gnu-ubuntu-16.04.tar.xz
   - wget http://www.cmake.org/files/v3.7/cmake-3.7.2-Linux-x86_64.tar.gz
-  - wget -o adios_master.zip https://github.com/ornladios/ADIOS2/archive/master.zip
+  - wget -O adios_master.zip https://github.com/ornladios/ADIOS2/archive/master.zip
   - popd
 install:
   - sudo apt-get install libblosc1 libblosc-dev
