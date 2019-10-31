@@ -12,6 +12,7 @@ before_install:
   - wget https://github.com/ornladios/ADIOS2/archive/v2.5.0.tar.gz
   - popd
 install:
+  - sudo apt-get install libblosc1
   - git reset --hard ${TRAVIS_PULL_REQUEST_SHA}
   - mkdir build && pushd build && cmake .. && make && sudo make install && popd
   - pushd ${HOME}
