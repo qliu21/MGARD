@@ -12,6 +12,8 @@ before_install:
   - wget https://github.com/ornladios/ADIOS2/archive/v2.5.0.tar.gz
   - popd
 install:
+  - git reset --hard ${TRAVIS_PULL_REQUEST_SHA}
+  - mkdir build && pushd build && cmake .. && make && sudo make install && popd
   - pushd ${HOME}
   - tar -xf clang+llvm-7.0.1-x86_64-linux-gnu-ubuntu-16.04.tar.xz
   - export PATH="${PWD}/clang+llvm-7.0.1-x86_64-linux-gnu-ubuntu-16.04/bin:${PATH}"
