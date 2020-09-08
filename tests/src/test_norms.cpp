@@ -17,11 +17,12 @@
 #include "data.hpp"
 #include "norms.hpp"
 
+#include "testing_random.hpp"
 #include "testing_utilities.hpp"
 
 static const double inf = std::numeric_limits<double>::infinity();
 
-TEST_CASE("basic norm properties", "[norms]") {
+TEST_CASE("unstructured basic norm properties", "[norms]") {
   const std::string filename = GENERATE("pyramid.msh", "tetrahedron.msh");
   moab::ErrorCode ecode;
   moab::Core mbcore;
@@ -42,8 +43,12 @@ TEST_CASE("basic norm properties", "[norms]") {
     // Likely not needed. Not checking now.
     std::fill(u_.begin(), u_.end(), 0);
     mgard::NodalCoefficients u(u_.data());
-    for (const double s : smoothness_parameters) {
-      REQUIRE(mgard::norm(u, hierarchy, s) == 0);
+    {
+      TrialTracker tracker;
+      for (const double s : smoothness_parameters) {
+        tracker += mgard::norm(u, hierarchy, s) == 0;
+      }
+      REQUIRE(tracker);
     }
 
     for (double &value : u_) {
@@ -52,12 +57,16 @@ TEST_CASE("basic norm properties", "[norms]") {
 
     std::vector<double> copy_(N);
     mgard::NodalCoefficients copy(copy_.data());
-    for (const double s : smoothness_parameters) {
-      blas::copy(N, u.data, copy.data);
-      const double alpha = distribution(generator);
-      blas::scal(N, alpha, copy.data);
-      REQUIRE(mgard::norm(copy, hierarchy, s) ==
-              Approx(std::abs(alpha) * mgard::norm(u, hierarchy, s)));
+    {
+      TrialTracker tracker;
+      for (const double s : smoothness_parameters) {
+        blas::copy(N, u.data, copy.data);
+        const double alpha = distribution(generator);
+        blas::scal(N, alpha, copy.data);
+        tracker += mgard::norm(copy, hierarchy, s) ==
+                   Approx(std::abs(alpha) * mgard::norm(u, hierarchy, s));
+      }
+      REQUIRE(tracker);
     }
   }
 
@@ -75,14 +84,17 @@ TEST_CASE("basic norm properties", "[norms]") {
     mgard::NodalCoefficients v(v_.data());
     mgard::NodalCoefficients w(w_.data());
     blas::axpy(N, 1.0, v.data, u.data);
+    TrialTracker tracker;
     for (const double s : smoothness_parameters) {
-      REQUIRE(mgard::norm(w, hierarchy, s) <=
-              mgard::norm(u, hierarchy, s) + mgard::norm(v, hierarchy, s));
+      tracker += mgard::norm(w, hierarchy, s) <=
+                 mgard::norm(u, hierarchy, s) + mgard::norm(v, hierarchy, s);
     }
+    REQUIRE(tracker);
   }
 }
 
-TEST_CASE("comparison with Python implementation: norms", "[norms]") {
+TEST_CASE("comparison with Python implementation: unstructured norms",
+          "[norms]") {
   moab::ErrorCode ecode;
   moab::Core mbcore;
   ecode = mbcore.load_file(mesh_path("circle.msh").c_str());

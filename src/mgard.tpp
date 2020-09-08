@@ -8,18 +8,18 @@
 #ifndef MGARD_TPP
 #define MGARD_TPP
 
-#include "mgard.h"
+#include "mgard.hpp"
 
 #include <cmath>
 #include <cstddef>
 #include <cstring>
-#include <iostream>
 
 #include <zlib.h>
 
 #include <bitset>
 #include <fstream>
 #include <numeric>
+#include <stdexcept>
 
 #ifdef MGARD_TIMING
 #include <chrono>
@@ -30,64 +30,24 @@
 #include "mgard_nuni.h"
 
 #include "LinearQuantizer.hpp"
-
-static void set_number_of_levels(const int nrow, const int ncol, int &nlevel) {
-  // set the depth of levels in isotropic case
-  if (nrow == 1) {
-    nlevel = mgard::Dimensions2kPlus1<1>({ncol}).nlevel;
-  } else if (nrow > 1) {
-    nlevel = mgard::Dimensions2kPlus1<2>({nrow, ncol}).nlevel;
-  }
-}
+#include "TensorMassMatrix.hpp"
+#include "TensorProlongation.hpp"
+#include "TensorRestriction.hpp"
 
 namespace mgard {
 
 template <typename Real>
 unsigned char *refactor_qz(int nrow, int ncol, int nfib, const Real *u,
                            int &outsize, Real tol) {
-  std::vector<Real> v(u, u + nrow * ncol * nfib), work(nrow * ncol * nfib),
-      work2d(nrow * ncol); // duplicate data and create work array
-  std::vector<Real> coords_x(ncol), coords_y(nrow),
-      coords_z(nfib); // coordinate arrays
-  // dummy equispaced coordinates
+  // Dummy equispaced coordinates.
+  std::vector<Real> coords_x(ncol);
+  std::vector<Real> coords_y(nrow);
+  std::vector<Real> coords_z(nfib);
   std::iota(std::begin(coords_x), std::end(coords_x), 0);
   std::iota(std::begin(coords_y), std::end(coords_y), 0);
   std::iota(std::begin(coords_z), std::end(coords_z), 0);
-
-  const Dimensions2kPlus1<3> dims({nrow, ncol, nfib});
-  const int l_target = dims.nlevel - 1;
-
-  Real norm = mgard_common::max_norm(v);
-
-  // TODO: in the `float` implementation, we divide by `nlevel + 2`.
-  tol /= dims.nlevel + 1;
-
-  mgard_gen::prep_3D(dims.rnded[0], dims.rnded[1], dims.rnded[2], dims.input[0],
-                     dims.input[1], dims.input[2], l_target, v.data(), work,
-                     work2d, coords_x, coords_y, coords_z);
-
-  mgard_gen::refactor_3D(dims.rnded[0], dims.rnded[1], dims.rnded[2],
-                         dims.input[0], dims.input[1], dims.input[2], l_target,
-                         v.data(), work, work2d, coords_x, coords_y, coords_z);
-
-  work.clear();
-  work2d.clear();
-
-  const int size_ratio = sizeof(Real) / sizeof(int);
-  std::vector<int> qv(nrow * ncol * nfib + size_ratio);
-
-  mgard::quantize_2D_interleave(
-      nrow, ncol * nfib, v.data(), qv, norm,
-      tol); // rename this to quantize Linfty or smthng!!!!
-
-  std::vector<unsigned char> out_data;
-
-  mgard::compress_memory_z(qv.data(), sizeof(int) * qv.size(), out_data);
-
-  outsize = out_data.size();
-  unsigned char *buffer = (unsigned char *)malloc(outsize);
-  std::copy(out_data.begin(), out_data.end(), buffer);
-  return buffer;
+  return refactor_qz(nrow, ncol, nfib, coords_x, coords_y, coords_z, u, outsize,
+                     tol);
 }
 
 template <typename Real>
@@ -95,6 +55,7 @@ unsigned char *
 refactor_qz(int nrow, int ncol, int nfib, std::vector<Real> &coords_x,
             std::vector<Real> &coords_y, std::vector<Real> &coords_z,
             const Real *u, int &outsize, Real tol) {
+  const TensorMeshHierarchy<3, Real> hierarchy({nrow, ncol, nfib});
   std::vector<Real> v(u, u + nrow * ncol * nfib), work(nrow * ncol * nfib),
       work2d(nrow * ncol); // duplicate data and create work array
 
@@ -120,9 +81,8 @@ refactor_qz(int nrow, int ncol, int nfib, std::vector<Real> &coords_x,
   const int size_ratio = sizeof(Real) / sizeof(int);
   std::vector<int> qv(nrow * ncol * nfib + size_ratio);
 
-  mgard::quantize_2D_interleave(
-      nrow, ncol * nfib, v.data(), qv, norm,
-      tol); // rename this to quantize Linfty or smthng!!!!
+  // rename this to quantize Linfty or smthng!!!!
+  quantize_interleave(hierarchy, v.data(), qv.data(), norm, tol);
 
   std::vector<unsigned char> out_data;
 
@@ -137,56 +97,15 @@ refactor_qz(int nrow, int ncol, int nfib, std::vector<Real> &coords_x,
 template <typename Real>
 unsigned char *refactor_qz(int nrow, int ncol, int nfib, const Real *u,
                            int &outsize, Real tol, Real s) {
-  std::vector<Real> v(u, u + nrow * ncol * nfib), work(nrow * ncol * nfib),
-      work2d(nrow * ncol); // duplicate data and create work array
-  std::vector<Real> coords_x(ncol), coords_y(nrow),
-      coords_z(nfib); // coordinate arrays
-
-  const Dimensions2kPlus1<3> dims({nrow, ncol, nfib});
-  const int l_target = dims.nlevel - 1;
-
-  // dummy equispaced coordinates
+  // Dummy equispaced coordinates.
+  std::vector<Real> coords_x(ncol);
+  std::vector<Real> coords_y(nrow);
+  std::vector<Real> coords_z(nfib);
   std::iota(std::begin(coords_x), std::end(coords_x), 0);
   std::iota(std::begin(coords_y), std::end(coords_y), 0);
   std::iota(std::begin(coords_z), std::end(coords_z), 0);
-
-  Real norm = 1.0;
-
-  if (std::abs(s) < 1e-10) {
-    norm = mgard_gen::ml2_norm3(0, nrow, ncol, nfib, nrow, ncol, nfib, v,
-                                coords_x, coords_y, coords_z);
-
-    norm = std::sqrt(norm /
-                     (nrow * nfib * ncol)); //<- quant scaling goes here for s
-  }
-
-  mgard_gen::prep_3D(dims.rnded[0], dims.rnded[1], dims.rnded[2], dims.input[0],
-                     dims.input[1], dims.input[2], l_target, v.data(), work,
-                     work2d, coords_x, coords_y, coords_z);
-
-  mgard_gen::refactor_3D(dims.rnded[0], dims.rnded[1], dims.rnded[2],
-                         dims.input[0], dims.input[1], dims.input[2], l_target,
-                         v.data(), work, work2d, coords_x, coords_y, coords_z);
-
-  work.clear();
-  work2d.clear();
-
-  const int size_ratio = sizeof(Real) / sizeof(int);
-  std::vector<int> qv(nrow * ncol * nfib + size_ratio);
-
-  mgard_gen::quantize_3D(dims.rnded[0], dims.rnded[1], dims.rnded[2],
-                         dims.input[0], dims.input[1], dims.input[2],
-                         dims.nlevel, v.data(), qv, coords_x, coords_y,
-                         coords_z, s, norm, tol);
-
-  std::vector<unsigned char> out_data;
-
-  mgard::compress_memory_z(qv.data(), sizeof(int) * qv.size(), out_data);
-
-  outsize = out_data.size();
-  unsigned char *buffer = (unsigned char *)malloc(outsize);
-  std::copy(out_data.begin(), out_data.end(), buffer);
-  return buffer;
+  return refactor_qz(nrow, ncol, nfib, coords_x, coords_y, coords_z, u, outsize,
+                     tol, s);
 }
 
 template <typename Real>
@@ -304,45 +223,22 @@ refactor_qz(int nrow, int ncol, int nfib, const Real *u, int &outsize, Real tol,
 template <typename Real>
 Real *recompose_udq(int nrow, int ncol, int nfib, unsigned char *data,
                     int data_len) {
-  const int size_ratio = sizeof(Real) / sizeof(int);
-  std::vector<Real> coords_x(ncol), coords_y(nrow),
-      coords_z(nfib); // coordinate arrays
-  std::vector<int> out_data(nrow * ncol * nfib + size_ratio);
-  std::vector<Real> work(nrow * ncol * nfib),
-      work2d(nrow * ncol); // duplicate data and create work array
-
-  //      dummy equispaced coordinates
+  // Dummy equispaced coordinates.
+  std::vector<Real> coords_x(ncol);
+  std::vector<Real> coords_y(nrow);
+  std::vector<Real> coords_z(nfib);
   std::iota(std::begin(coords_x), std::end(coords_x), 0);
   std::iota(std::begin(coords_y), std::end(coords_y), 0);
   std::iota(std::begin(coords_z), std::end(coords_z), 0);
-
-  //    //std::cout  <<"**** coord check : "  << coords_x[4] << "\n";
-
-  const Dimensions2kPlus1<3> dims({nrow, ncol, nfib});
-  const int l_target = dims.nlevel - 1;
-
-  mgard::decompress_memory_z(data, data_len, out_data.data(),
-                             out_data.size() *
-                                 sizeof(int)); // decompress input buffer
-  Real *v = (Real *)malloc(nrow * ncol * nfib * sizeof(Real));
-
-  mgard::dequantize_2D_interleave(nrow, ncol * nfib, v, out_data);
-
-  mgard_gen::recompose_3D(dims.rnded[0], dims.rnded[1], dims.rnded[2],
-                          dims.input[0], dims.input[1], dims.input[2], l_target,
-                          v, work, work2d, coords_x, coords_y, coords_z);
-
-  mgard_gen::postp_3D(dims.rnded[0], dims.rnded[1], dims.rnded[2],
-                      dims.input[0], dims.input[1], dims.input[2], l_target, v,
-                      work, coords_x, coords_y, coords_z);
-
-  return v;
+  return recompose_udq(nrow, ncol, nfib, coords_x, coords_y, coords_z, data,
+                       data_len);
 }
 
 template <typename Real>
 Real *recompose_udq(int nrow, int ncol, int nfib, std::vector<Real> &coords_x,
                     std::vector<Real> &coords_y, std::vector<Real> &coords_z,
                     unsigned char *data, int data_len) {
+  const TensorMeshHierarchy<3, Real> hierarchy({nrow, ncol, nfib});
   const int size_ratio = sizeof(Real) / sizeof(int);
   std::vector<int> out_data(nrow * ncol * nfib + size_ratio);
   std::vector<Real> work(nrow * ncol * nfib),
@@ -356,7 +252,7 @@ Real *recompose_udq(int nrow, int ncol, int nfib, std::vector<Real> &coords_x,
                                  sizeof(int)); // decompress input buffer
   Real *v = (Real *)malloc(nrow * ncol * nfib * sizeof(Real));
 
-  mgard::dequantize_2D_interleave(nrow, ncol * nfib, v, out_data);
+  dequantize_interleave(hierarchy, v, out_data.data());
 
   mgard_gen::recompose_3D(dims.rnded[0], dims.rnded[1], dims.rnded[2],
                           dims.input[0], dims.input[1], dims.input[2], l_target,
@@ -372,65 +268,16 @@ Real *recompose_udq(int nrow, int ncol, int nfib, std::vector<Real> &coords_x,
 template <typename Real>
 Real *recompose_udq(int nrow, int ncol, int nfib, unsigned char *data,
                     int data_len, Real s) {
-  const int size_ratio = sizeof(Real) / sizeof(int);
-  std::vector<Real> coords_x(ncol), coords_y(nrow),
-      coords_z(nfib); // coordinate arrays
-  std::vector<int> out_data(nrow * ncol * nfib + size_ratio);
-  std::vector<Real> work(nrow * ncol * nfib),
-      work2d(nrow * ncol); // duplicate data and create work array
-
-  //    Real s = 0; // Defaulting to L2 compression for a start.
-  Real norm = 1; // defaulting to absolute s, may switch to relative
-
-  //      dummy equispaced coordinates
+  // Dummy equispaced coordinates.
+  std::vector<Real> coords_x(ncol);
+  std::vector<Real> coords_y(nrow);
+  std::vector<Real> coords_z(nfib);
   std::iota(std::begin(coords_x), std::end(coords_x), 0);
   std::iota(std::begin(coords_y), std::end(coords_y), 0);
   std::iota(std::begin(coords_z), std::end(coords_z), 0);
-
-  //    //std::cout  <<"**** coord check : "  << coords_x[4] << "\n";
-
-  const Dimensions2kPlus1<3> dims({nrow, ncol, nfib});
-  const int l_target = dims.nlevel - 1;
-
-  mgard::decompress_memory_z(data, data_len, out_data.data(),
-                             out_data.size() *
-                                 sizeof(int)); // decompress input buffer
-  Real *v = (Real *)malloc(nrow * ncol * nfib * sizeof(Real));
-
-  //    outfile.write( reinterpret_cast<char*>( out_data.data() ),
-  //    (nrow*ncol*nfib + size_ratio)*sizeof(int) );
-
-  mgard_gen::dequantize_3D(
-      dims.rnded[0], dims.rnded[1], dims.rnded[2], dims.input[0], dims.input[1],
-      dims.input[2], dims.nlevel, v, out_data, coords_x, coords_y, coords_z, s);
-  //    mgard::dequantize_2D_interleave(nrow, ncol*nfib, v, out_data) ;
-
-  //    mgard_common::qread_2D_interleave(nrow,  ncol, nlevel, work.data(),
-  //    out_file);
-
-  // mgard_gen::dequant_3D(
-  //     dims.rnded[0], dims.rnded[1], dims.rnded[2],
-  //     dims.input[0], dims.input[1], dims.input[2],
-  //     dims.nlevel, dims.nlevel,
-  //     v, work.data(), coords_x, coords_y,  coords_z, s
-  // );
-
-  // std::ofstream outfile(out_file, std::ios::out | std::ios::binary);
-
-  //    w
-  mgard_gen::recompose_3D(dims.rnded[0], dims.rnded[1], dims.rnded[2],
-                          dims.input[0], dims.input[1], dims.input[2], l_target,
-                          v, work, work2d, coords_x, coords_y, coords_z);
-
-  mgard_gen::postp_3D(dims.rnded[0], dims.rnded[1], dims.rnded[2],
-                      dims.input[0], dims.input[1], dims.input[2], l_target, v,
-                      work, coords_x, coords_y, coords_z);
-
-  //    outfile.write( reinterpret_cast<char*>( v ),
-  //    nrow*ncol*nfib*sizeof(Real) ;)
-  return v;
+  return recompose_udq(nrow, ncol, nfib, coords_x, coords_y, coords_z, data,
+                       data_len, s);
 }
-//}
 
 template <typename Real>
 Real *recompose_udq(int nrow, int ncol, int nfib, std::vector<Real> &coords_x,
@@ -489,23 +336,22 @@ Real *recompose_udq(int nrow, int ncol, int nfib, std::vector<Real> &coords_x,
 
 template <typename Real>
 unsigned char *refactor_qz_1D(int ncol, const Real *u, int &outsize, Real tol) {
+  const Dimensions2kPlus1<1> dims({ncol});
+  const TensorMeshHierarchy<1, Real> hierarchy({ncol});
 
   std::vector<Real> row_vec(ncol);
   std::vector<Real> v(u, u + ncol), work(ncol);
 
   Real norm = mgard_2d::mgard_common::max_norm(v);
 
-  if (is_2kplus1(ncol)) // input is (2^p + 1)
-  {
+  if (dims.is_2kplus1()) {
     // to be clean up.
-
-    int nlevel;
-    set_number_of_levels(1, ncol, nlevel);
-    tol /= nlevel + 1;
 #ifdef MGARD_TIMING
     auto start = std::chrono::high_resolution_clock::now();
 #endif
-    const int l_target = nlevel - 1;
+    tol /= dims.nlevel + 1;
+
+    const int l_target = dims.nlevel - 1;
     mgard::refactor_1D(ncol, l_target, v.data(), work, row_vec);
 
     work.clear();
@@ -514,12 +360,13 @@ unsigned char *refactor_qz_1D(int ncol, const Real *u, int &outsize, Real tol) {
     int size_ratio = sizeof(Real) / sizeof(int);
     std::vector<int> qv(ncol + size_ratio);
 
-    mgard::quantize_2D_interleave(1, ncol, v.data(), qv, norm, tol);
 #ifdef MGARD_TIMING
     auto stop = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
     std::cout << "Refactor Time = " << (double)duration.count()/1000000 << "\n";
 #endif
+    quantize_interleave(hierarchy, v.data(), qv.data(), norm, tol);
+
     std::vector<unsigned char> out_data;
 
     return mgard::compress_memory_huffman(qv, out_data, outsize);
@@ -528,7 +375,6 @@ unsigned char *refactor_qz_1D(int ncol, const Real *u, int &outsize, Real tol) {
 
     std::iota(std::begin(coords_x), std::end(coords_x), 0);
 
-    const Dimensions2kPlus1<1> dims({ncol});
     tol /= dims.nlevel + 1;
 
     const int l_target = dims.nlevel - 1;
@@ -547,12 +393,13 @@ unsigned char *refactor_qz_1D(int ncol, const Real *u, int &outsize, Real tol) {
     const int size_ratio = sizeof(Real) / sizeof(int);
     std::vector<int> qv(ncol + size_ratio);
 
-    mgard::quantize_2D_interleave(1, ncol, v.data(), qv, norm, tol);
 #ifdef MGARD_TIMING
     auto stop = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::seconds>(stop - start);
     std::cout << "Refactor Time = " << duration.count() << "\n";
 #endif
+    quantize_interleave(hierarchy, v.data(), qv.data(), norm, tol);
+
     std::vector<unsigned char> out_data;
 
     return mgard::compress_memory_huffman(qv, out_data, outsize);
@@ -562,20 +409,21 @@ unsigned char *refactor_qz_1D(int ncol, const Real *u, int &outsize, Real tol) {
 template <typename Real>
 unsigned char *refactor_qz_2D(int nrow, int ncol, const Real *u, int &outsize,
                               Real tol) {
+  const Dimensions2kPlus1<2> dims({nrow, ncol});
+  const TensorMeshHierarchy<2, Real> hierarchy({nrow, ncol});
+  if (dims.is_2kplus1()) {
+    std::vector<Real> row_vec(ncol);
+    std::vector<Real> col_vec(nrow);
+    std::vector<Real> v(u, u + nrow * ncol), work(nrow * ncol);
 
-  std::vector<Real> row_vec(ncol);
-  std::vector<Real> col_vec(nrow);
-  std::vector<Real> v(u, u + nrow * ncol), work(nrow * ncol);
+    Real norm = mgard_2d::mgard_common::max_norm(v);
 
-  Real norm = mgard_2d::mgard_common::max_norm(v);
+    // TODO: Elsewhere we have divided by `nlevel + 2`. I believe it has to do
+    // with the extra level (not present here) with dimensions not of the form
+    // `2^k + 1`.
+    tol /= dims.nlevel + 1;
 
-  if (is_2kplus1(nrow) && is_2kplus1(ncol)) // input is (2^q + 1) x (2^p + 1)
-  {
-    int nlevel;
-    set_number_of_levels(nrow, ncol, nlevel);
-    tol /= nlevel + 1;
-
-    const int l_target = nlevel - 1;
+    const int l_target = dims.nlevel - 1;
     mgard::refactor(nrow, ncol, l_target, v.data(), work, row_vec, col_vec);
     work.clear();
     row_vec.clear();
@@ -584,7 +432,7 @@ unsigned char *refactor_qz_2D(int nrow, int ncol, const Real *u, int &outsize,
     const int size_ratio = sizeof(Real) / sizeof(int);
     std::vector<int> qv(nrow * ncol + size_ratio);
 
-    mgard::quantize_2D_interleave(nrow, ncol, v.data(), qv, norm, tol);
+    quantize_interleave(hierarchy, v.data(), qv.data(), norm, tol);
 
     std::vector<unsigned char> out_data;
 
@@ -594,45 +442,12 @@ unsigned char *refactor_qz_2D(int nrow, int ncol, const Real *u, int &outsize,
     std::copy(out_data.begin(), out_data.end(), buffer);
     return buffer;
   } else {
-
-    std::vector<Real> coords_x(ncol), coords_y(nrow);
-
+    // Dummy equispaced coordinates.
+    std::vector<Real> coords_x(ncol);
+    std::vector<Real> coords_y(nrow);
     std::iota(std::begin(coords_x), std::end(coords_x), 0);
     std::iota(std::begin(coords_y), std::end(coords_y), 0);
-
-    const Dimensions2kPlus1<2> dims({nrow, ncol});
-    tol /= dims.nlevel + 1;
-
-    const int l_target = dims.nlevel - 1;
-
-    mgard_2d::mgard_gen::prep_2D(dims.rnded[0], dims.rnded[1], dims.input[0],
-                                 dims.input[1], l_target, v.data(), work,
-                                 coords_x, coords_y, row_vec, col_vec);
-
-    mgard_2d::mgard_gen::refactor_2D(
-        dims.rnded[0], dims.rnded[1], dims.input[0], dims.input[1], l_target,
-        v.data(), work, coords_x, coords_y, row_vec, col_vec);
-
-    work.clear();
-    col_vec.clear();
-    row_vec.clear();
-
-    const int size_ratio = sizeof(Real) / sizeof(int);
-    std::vector<int> qv(nrow * ncol + size_ratio);
-
-    // Uncomment the following. Otherwise the tolerence is divided twice.
-    // Q. Liu 3/2/2020.
-    // tol /= dims.nlevel + 1;
-    mgard::quantize_2D_interleave(nrow, ncol, v.data(), qv, norm, tol);
-
-    std::vector<unsigned char> out_data;
-
-    mgard::compress_memory_z(qv.data(), sizeof(int) * qv.size(), out_data);
-
-    outsize = out_data.size();
-    unsigned char *buffer = (unsigned char *)malloc(outsize);
-    std::copy(out_data.begin(), out_data.end(), buffer);
-    return buffer;
+    return refactor_qz_2D(nrow, ncol, coords_x, coords_y, u, outsize, tol);
   }
 }
 
@@ -640,6 +455,7 @@ template <typename Real>
 unsigned char *refactor_qz_2D(int nrow, int ncol, std::vector<Real> &coords_x,
                               std::vector<Real> &coords_y, const Real *u,
                               int &outsize, Real tol) {
+  const TensorMeshHierarchy<2, Real> hierarchy({nrow, ncol});
 
   std::vector<Real> row_vec(ncol);
   std::vector<Real> col_vec(nrow);
@@ -670,7 +486,7 @@ unsigned char *refactor_qz_2D(int nrow, int ncol, std::vector<Real> &coords_x,
   std::vector<int> qv(nrow * ncol + size_ratio);
 
   tol /= dims.nlevel + 1;
-  mgard::quantize_2D_interleave(nrow, ncol, v.data(), qv, norm, tol);
+  quantize_interleave(hierarchy, v.data(), qv.data(), norm, tol);
 
   std::vector<unsigned char> out_data;
 
@@ -685,20 +501,17 @@ unsigned char *refactor_qz_2D(int nrow, int ncol, std::vector<Real> &coords_x,
 template <typename Real>
 unsigned char *refactor_qz_2D(int nrow, int ncol, const Real *u, int &outsize,
                               Real tol, Real s) {
+  const Dimensions2kPlus1<2> dims({nrow, ncol});
+  if (dims.is_2kplus1()) {
+    std::vector<Real> row_vec(ncol);
+    std::vector<Real> col_vec(nrow);
+    std::vector<Real> v(u, u + nrow * ncol), work(nrow * ncol);
 
-  std::vector<Real> row_vec(ncol);
-  std::vector<Real> col_vec(nrow);
-  std::vector<Real> v(u, u + nrow * ncol), work(nrow * ncol);
+    Real norm = mgard_2d::mgard_common::max_norm(v);
 
-  Real norm = mgard_2d::mgard_common::max_norm(v);
+    tol /= dims.nlevel + 1;
 
-  if (is_2kplus1(nrow) && is_2kplus1(ncol)) // input is (2^q + 1) x (2^p + 1)
-  {
-    int nlevel;
-    set_number_of_levels(nrow, ncol, nlevel);
-    tol /= nlevel + 1;
-
-    const int l_target = nlevel - 1;
+    const int l_target = dims.nlevel - 1;
     mgard::refactor(nrow, ncol, l_target, v.data(), work, row_vec, col_vec);
     work.clear();
     row_vec.clear();
@@ -714,7 +527,7 @@ unsigned char *refactor_qz_2D(int nrow, int ncol, const Real *u, int &outsize,
 
     // mgard::quantize_2D_interleave (nrow, ncol, v.data(), qv, norm, tol);
 
-    mgard_gen::quantize_2D(nrow, ncol, nrow, ncol, nlevel, v.data(), qv,
+    mgard_gen::quantize_2D(nrow, ncol, nrow, ncol, dims.nlevel, v.data(), qv,
                            coords_x, coords_y, s, norm, tol);
 
     std::vector<unsigned char> out_data;
@@ -725,44 +538,12 @@ unsigned char *refactor_qz_2D(int nrow, int ncol, const Real *u, int &outsize,
     std::copy(out_data.begin(), out_data.end(), buffer);
     return buffer;
   } else {
-
-    std::vector<Real> coords_x(ncol), coords_y(nrow);
-
+    // Dummy equispaced coordinates.
+    std::vector<Real> coords_x(ncol);
+    std::vector<Real> coords_y(nrow);
     std::iota(std::begin(coords_x), std::end(coords_x), 0);
     std::iota(std::begin(coords_y), std::end(coords_y), 0);
-
-    const Dimensions2kPlus1<2> dims({nrow, ncol});
-    tol /= dims.nlevel + 1;
-
-    const int l_target = dims.nlevel - 1;
-
-    mgard_2d::mgard_gen::prep_2D(dims.rnded[0], dims.rnded[1], dims.input[0],
-                                 dims.input[1], l_target, v.data(), work,
-                                 coords_x, coords_y, row_vec, col_vec);
-
-    mgard_2d::mgard_gen::refactor_2D(
-        dims.rnded[0], dims.rnded[1], dims.input[0], dims.input[1], l_target,
-        v.data(), work, coords_x, coords_y, row_vec, col_vec);
-
-    work.clear();
-    col_vec.clear();
-    row_vec.clear();
-
-    const int size_ratio = sizeof(Real) / sizeof(int);
-    std::vector<int> qv(nrow * ncol + size_ratio);
-
-    mgard_gen::quantize_2D(dims.rnded[0], dims.rnded[1], dims.input[0],
-                           dims.input[1], dims.nlevel, v.data(), qv, coords_x,
-                           coords_y, s, norm, tol);
-
-    std::vector<unsigned char> out_data;
-
-    mgard::compress_memory_z(qv.data(), sizeof(int) * qv.size(), out_data);
-
-    outsize = out_data.size();
-    unsigned char *buffer = (unsigned char *)malloc(outsize);
-    std::copy(out_data.begin(), out_data.end(), buffer);
-    return buffer;
+    return refactor_qz_2D(nrow, ncol, coords_x, coords_y, u, outsize, tol, s);
   }
 }
 
@@ -813,12 +594,13 @@ unsigned char *refactor_qz_2D(int nrow, int ncol, std::vector<Real> &coords_x,
 
 template <typename Real>
 Real *recompose_udq_1D_huffman(int ncol, unsigned char *data, int data_len) {
+  const Dimensions2kPlus1<1> dims({ncol});
+  const TensorMeshHierarchy<1, Real> hierarchy({ncol});
   const int size_ratio = sizeof(Real) / sizeof(int);
 
-  if (is_2kplus1(ncol)) // input is (2^p + 1)
+  if (dims.is_2kplus1()) // input is (2^p + 1)
   {
     // to be cleaned up.
-    const Dimensions2kPlus1<1> dims({ncol});
     const int l_target = dims.nlevel - 1;
 #if 0
     int ncol_new = ncol;
@@ -834,7 +616,7 @@ Real *recompose_udq_1D_huffman(int ncol, unsigned char *data, int data_len) {
 
     Real *v = (Real *)malloc(ncol * sizeof(Real));
 
-    mgard::dequantize_2D_interleave(1, ncol, v, out_data);
+    dequantize_interleave(hierarchy, v, out_data.data());
     out_data.clear();
 
     std::vector<Real> row_vec(ncol);
@@ -849,7 +631,6 @@ Real *recompose_udq_1D_huffman(int ncol, unsigned char *data, int data_len) {
 
     std::iota(std::begin(coords_x), std::end(coords_x), 0);
 
-    const Dimensions2kPlus1<1> dims({ncol});
     const int l_target = dims.nlevel - 1;
 
     std::vector<int> out_data(ncol + size_ratio);
@@ -858,7 +639,7 @@ Real *recompose_udq_1D_huffman(int ncol, unsigned char *data, int data_len) {
 
     Real *v = (Real *)malloc(ncol * sizeof(Real));
 
-    mgard::dequantize_2D_interleave(1, ncol, v, out_data);
+    dequantize_interleave(hierarchy, v, out_data.data());
 
     std::vector<Real> row_vec(ncol);
     std::vector<Real> work(ncol);
@@ -875,12 +656,12 @@ Real *recompose_udq_1D_huffman(int ncol, unsigned char *data, int data_len) {
 
 template <typename Real>
 Real *recompose_udq_1D(int ncol, unsigned char *data, int data_len) {
+  const Dimensions2kPlus1<1> dims({ncol});
+  const TensorMeshHierarchy<1, Real> hierarchy({ncol});
   const int size_ratio = sizeof(Real) / sizeof(int);
 
-  if (is_2kplus1(ncol)) // input is (2^p + 1)
-  {
+  if (dims.is_2kplus1()) {
     // to be cleaned up.
-    const Dimensions2kPlus1<1> dims({ncol});
     const int l_target = dims.nlevel - 1;
 #if 0
     int ncol_new = ncol;
@@ -897,7 +678,7 @@ Real *recompose_udq_1D(int ncol, unsigned char *data, int data_len) {
 
     Real *v = (Real *)malloc(ncol * sizeof(Real));
 
-    mgard::dequantize_2D_interleave(1, ncol, v, out_data);
+    mgard::dequantize_interleave(hierarchy, v, out_data.data());
     out_data.clear();
 
     std::vector<Real> row_vec(ncol);
@@ -921,7 +702,7 @@ Real *recompose_udq_1D(int ncol, unsigned char *data, int data_len) {
 
     Real *v = (Real *)malloc(ncol * sizeof(Real));
 
-    mgard::dequantize_2D_interleave(1, ncol, v, out_data);
+    mgard::dequantize_interleave(hierarchy, v, out_data.data());
 
     std::vector<Real> row_vec(ncol);
     std::vector<Real> work(ncol);
@@ -938,43 +719,10 @@ Real *recompose_udq_1D(int ncol, unsigned char *data, int data_len) {
 
 template <typename Real>
 Real *recompose_udq_2D(int nrow, int ncol, unsigned char *data, int data_len) {
-  const int size_ratio = sizeof(Real) / sizeof(int);
-
-  if (is_2kplus1(nrow) && is_2kplus1(ncol)) // input is (2^q + 1) x (2^p + 1)
-  {
-    int ncol_new = ncol;
-    int nrow_new = nrow;
-
-    int nlevel_new;
-    set_number_of_levels(nrow_new, ncol_new, nlevel_new);
-    const int l_target = nlevel_new - 1;
-
-    std::vector<int> out_data(nrow_new * ncol_new + size_ratio);
-
-    mgard::decompress_memory_z(data, data_len, out_data.data(),
-                               out_data.size() *
-                                   sizeof(int)); // decompress input buffer
-
-    Real *v = (Real *)malloc(nrow_new * ncol_new * sizeof(Real));
-
-    mgard::dequantize_2D_interleave(nrow_new, ncol_new, v, out_data);
-    out_data.clear();
-
-    std::vector<Real> row_vec(ncol_new);
-    std::vector<Real> col_vec(nrow_new);
-    std::vector<Real> work(nrow_new * ncol_new);
-
-    mgard::recompose(nrow_new, ncol_new, l_target, v, work, row_vec, col_vec);
-
-    return v;
-
-  } else {
-    std::vector<Real> coords_x(ncol), coords_y(nrow);
-
-    std::iota(std::begin(coords_x), std::end(coords_x), 0);
-    std::iota(std::begin(coords_y), std::end(coords_y), 0);
-
-    const Dimensions2kPlus1<2> dims({nrow, ncol});
+  const Dimensions2kPlus1<2> dims({nrow, ncol});
+  const TensorMeshHierarchy<2, Real> hierarchy({nrow, ncol});
+  if (dims.is_2kplus1()) {
+    const int size_ratio = sizeof(Real) / sizeof(int);
     const int l_target = dims.nlevel - 1;
 
     std::vector<int> out_data(nrow * ncol + size_ratio);
@@ -985,21 +733,24 @@ Real *recompose_udq_2D(int nrow, int ncol, unsigned char *data, int data_len) {
 
     Real *v = (Real *)malloc(nrow * ncol * sizeof(Real));
 
-    mgard::dequantize_2D_interleave(nrow, ncol, v, out_data);
+    dequantize_interleave(hierarchy, v, out_data.data());
+    out_data.clear();
 
     std::vector<Real> row_vec(ncol);
     std::vector<Real> col_vec(nrow);
     std::vector<Real> work(nrow * ncol);
 
-    mgard_2d::mgard_gen::recompose_2D(
-        dims.rnded[0], dims.rnded[1], dims.input[0], dims.input[1], l_target, v,
-        work, coords_x, coords_y, row_vec, col_vec);
-
-    mgard_2d::mgard_gen::postp_2D(dims.rnded[0], dims.rnded[1], dims.input[0],
-                                  dims.input[1], l_target, v, work, coords_x,
-                                  coords_y, row_vec, col_vec);
+    mgard::recompose(nrow, ncol, l_target, v, work, row_vec, col_vec);
 
     return v;
+
+  } else {
+    // Dummy equispaced coordinates.
+    std::vector<Real> coords_x(ncol);
+    std::vector<Real> coords_y(nrow);
+    std::iota(std::begin(coords_x), std::end(coords_x), 0);
+    std::iota(std::begin(coords_y), std::end(coords_y), 0);
+    return recompose_udq_2D(nrow, ncol, coords_x, coords_y, data, data_len);
   }
 }
 
@@ -1007,6 +758,7 @@ template <typename Real>
 Real *recompose_udq_2D(int nrow, int ncol, std::vector<Real> &coords_x,
                        std::vector<Real> &coords_y, unsigned char *data,
                        int data_len) {
+  const TensorMeshHierarchy<2, Real> hierarchy({nrow, ncol});
   const int size_ratio = sizeof(Real) / sizeof(int);
 
   const Dimensions2kPlus1<2> dims({nrow, ncol});
@@ -1020,7 +772,7 @@ Real *recompose_udq_2D(int nrow, int ncol, std::vector<Real> &coords_x,
 
   Real *v = (Real *)malloc(nrow * ncol * sizeof(Real));
 
-  mgard::dequantize_2D_interleave(nrow, ncol, v, out_data);
+  dequantize_interleave(hierarchy, v, out_data.data());
 
   std::vector<Real> row_vec(ncol);
   std::vector<Real> col_vec(nrow);
@@ -1040,76 +792,44 @@ Real *recompose_udq_2D(int nrow, int ncol, std::vector<Real> &coords_x,
 template <typename Real>
 Real *recompose_udq_2D(int nrow, int ncol, unsigned char *data, int data_len,
                        Real s) {
-  const int size_ratio = sizeof(Real) / sizeof(int);
-
-  if (is_2kplus1(nrow) && is_2kplus1(ncol)) // input is (2^q + 1) x (2^p + 1)
-  {
-    int ncol_new = ncol;
-    int nrow_new = nrow;
-
-    int nlevel_new;
-    set_number_of_levels(nrow_new, ncol_new, nlevel_new);
-    const int l_target = nlevel_new - 1;
+  const Dimensions2kPlus1<2> dims({nrow, ncol});
+  if (dims.is_2kplus1()) {
+    const int size_ratio = sizeof(Real) / sizeof(int);
+    const int l_target = dims.nlevel - 1;
 
     std::vector<Real> coords_x(ncol), coords_y(nrow);
 
     std::iota(std::begin(coords_x), std::end(coords_x), 0);
     std::iota(std::begin(coords_y), std::end(coords_y), 0);
 
-    std::vector<int> out_data(nrow_new * ncol_new + size_ratio);
+    std::vector<int> out_data(nrow * ncol + size_ratio);
 
     mgard::decompress_memory_z(data, data_len, out_data.data(),
                                out_data.size() *
                                    sizeof(int)); // decompress input buffer
 
-    Real *v = (Real *)malloc(nrow_new * ncol_new * sizeof(Real));
-
-    //      mgard::dequantize_2D_interleave(nrow_new, ncol_new, v, out_data) ;
-    mgard_gen::dequantize_2D(nrow, ncol, nrow, ncol, nlevel_new, v, out_data,
-                             coords_x, coords_y, s);
-    out_data.clear();
-
-    std::vector<Real> row_vec(ncol_new);
-    std::vector<Real> col_vec(nrow_new);
-    std::vector<Real> work(nrow_new * ncol_new);
-
-    mgard::recompose(nrow_new, ncol_new, l_target, v, work, row_vec, col_vec);
-
-    return v;
-
-  } else {
-    std::vector<Real> coords_x(ncol), coords_y(nrow);
-
-    std::iota(std::begin(coords_x), std::end(coords_x), 0);
-    std::iota(std::begin(coords_y), std::end(coords_y), 0);
-
-    const Dimensions2kPlus1<2> dims({nrow, ncol});
-    const int l_target = dims.nlevel - 1;
-
-    std::vector<int> out_data(nrow * ncol + size_ratio);
-
-    mgard::decompress_memory_z(data, data_len, out_data.data(),
-                               out_data.size() * sizeof(int));
-
     Real *v = (Real *)malloc(nrow * ncol * sizeof(Real));
 
-    mgard_gen::dequantize_2D(dims.rnded[0], dims.rnded[1], dims.input[0],
-                             dims.input[1], dims.nlevel, v, out_data, coords_x,
-                             coords_y, s);
+    //      mgard::dequantize_2D_interleave(nrow, ncol, v, out_data) ;
+    mgard_gen::dequantize_2D(nrow, ncol, nrow, ncol, dims.nlevel, v, out_data,
+                             coords_x, coords_y, s);
+    out_data.clear();
 
     std::vector<Real> row_vec(ncol);
     std::vector<Real> col_vec(nrow);
     std::vector<Real> work(nrow * ncol);
 
-    mgard_2d::mgard_gen::recompose_2D(
-        dims.rnded[0], dims.rnded[1], dims.input[0], dims.input[1], l_target, v,
-        work, coords_x, coords_y, row_vec, col_vec);
-
-    mgard_2d::mgard_gen::postp_2D(dims.rnded[0], dims.rnded[1], dims.input[0],
-                                  dims.input[1], l_target, v, work, coords_x,
-                                  coords_y, row_vec, col_vec);
+    mgard::recompose(nrow, ncol, l_target, v, work, row_vec, col_vec);
 
     return v;
+
+  } else {
+    // Dummy equispaced coordinates.
+    std::vector<Real> coords_x(ncol);
+    std::vector<Real> coords_y(nrow);
+    std::iota(std::begin(coords_x), std::end(coords_x), 0);
+    std::iota(std::begin(coords_y), std::end(coords_y), 0);
+    return recompose_udq_2D(nrow, ncol, coords_x, coords_y, data, data_len, s);
   }
 }
 
@@ -1214,421 +934,355 @@ Real *recompose_udq_2D(int nrow, int ncol, std::vector<Real> &coords_x,
 //     }
 // }
 
-template <typename Real>
-void mass_matrix_multiply(const int l, std::vector<Real> &v) {
-
-  int stride = std::pow(2, l);
-  Real temp1, temp2;
-  Real fac = 0.5;
-  // Mass matrix times nodal value-vec
-  temp1 = v.front(); // save u(0) for later use
-  v.front() = fac * (2.0 * temp1 + v.at(stride));
-  for (auto it = v.begin() + stride; it < v.end() - stride; it += stride) {
-    temp2 = *it;
-    *it = fac * (temp1 + 4 * temp2 + *(it + stride));
-    temp1 = temp2; // save u(n) for later use
+template <std::size_t N, typename Real>
+void mass_matrix_multiply(const TensorMeshHierarchy<N, Real> &hierarchy,
+                          const int index_difference,
+                          const std::size_t dimension, Real *const v) {
+  // TODO: This will be unnecessary once we change `index_difference`/`l` to be
+  // an index instead of a difference of indices.
+  const std::size_t l = hierarchy.l(index_difference);
+  const std::size_t stride = hierarchy.stride(l, dimension);
+  const std::size_t n = hierarchy.meshes.at(l).shape.at(dimension);
+  // The entries of the mass matrix are scaled by `h / 6`. We assume that the
+  // cells of the finest level have width `6`, so that the cells on this level
+  // have width `6 * stride`. `factor` is then `h / 6`.
+  const Real factor = stride;
+  Real left, middle, right;
+  Real *p = v;
+  middle = *p;
+  right = *(p + stride);
+  *p = factor * (2 * middle + right);
+  p += stride;
+  for (std::size_t i = 1; i + 1 < n; ++i) {
+    left = middle;
+    middle = right;
+    right = *(p + stride);
+    *p = factor * (left + 4 * middle + right);
+    p += stride;
   }
-  v.back() = fac * (2 * v.back() + temp1);
+  left = middle;
+  middle = right;
+  *p = factor * (left + 2 * middle);
 }
 
-template <typename Real>
-void solve_tridiag_M(const int l, std::vector<Real> &v) {
+template <std::size_t N, typename Real>
+void solve_tridiag_M(const TensorMeshHierarchy<N, Real> &hierarchy,
+                     const int index_difference, const std::size_t dimension,
+                     Real *const v) {
+  // The system is solved using the Thomas algorithm. See <https://
+  // en.wikipedia.org/wiki/Tridiagonal_matrix_algorithm>. In case the article
+  // changes, the algorithm is copied here.
+  //    // [b_1, …, b_n] is the diagonal of the matrix. `[a_2, …, a_n]` is the
+  //    // subdiagonal, and `[c_1, …, c_{n - 1}]` is the superdiagonal.
+  //    // `[d_1, …, d_n]` is the righthand side, and `[x_1, …, x_n]` is the
+  //    // solution.
+  //    for i = 2, …, n do
+  //      w_i = a_i / b_{i - 1}
+  //      b_i := b_i - w_i * c_{i - 1}
+  //      d_i := d_i - w_i * d_{i - 1}
+  //    end
+  //    x_n = d_n / b_n
+  //    for i = n - 1, …, 1 do
+  //      x_i = (d_i - c_i * x_{i + 1}) / b_i
+  //    end
+  // The mass matrix  entries are scaled by `h / 6`. We postpone accounting for
+  // the scaling to the backward sweep.
+  const std::size_t l = hierarchy.l(index_difference);
+  const std::size_t stride = hierarchy.stride(l, dimension);
+  const std::size_t n = hierarchy.meshes.at(l).shape.at(dimension);
+  // See the note in `mass_matrix_multiply`.
+  const Real factor = stride;
 
-  //  int my_level = nlevel - l;
-  int stride = std::pow(2, l); // current stride
-
-  Real am, bm;
-
-  am = 2.0; // first element of upper diagonal U.
-
-  bm = 1.0 / am;
-
-  int nlevel = nlevel_from_size(v.size());
-  int n = std::pow(2, nlevel - l) + 1;
-  std::vector<Real> coeff(n);
-  int counter = 1;
-  coeff.front() = am;
-
-  // forward sweep
-  for (auto it = std::begin(v) + stride; it < std::end(v) - stride;
-       it += stride) {
-    *(it) -= *(it - stride) / am;
-
-    am = 4.0 - bm;
-    bm = 1.0 / am;
-
-    coeff.at(counter) = am;
-    ++counter;
-  }
-  am = 2.0 - bm; // a_n = 2 - b_(n-1)
-
-  auto it = v.end() - stride - 1;
-  v.back() -= (*it) * bm; // last element
-
-  coeff.at(counter) = am;
-
-  // backward sweep
-
-  v.back() /= am;
-  --counter;
-
-  for (auto it = v.rbegin() + stride; it <= v.rend(); it += stride) {
-
-    *(it) = (*(it) - *(it - stride)) / coeff.at(counter);
-    --counter;
-    bm = 4.0 - am; // maybe assign 1/am -> bm?
-    am = 1.0 / bm;
-  }
-}
-
-template <typename Real> void restriction(const int l, std::vector<Real> &v) {
-  int stride = std::pow(2, l);
-  int Pstride = stride / 2;
-
-  // calculate the result of restrictionion
-  auto it = v.begin() + Pstride;
-  v.front() += 0.5 * (*it); // first element
-  for (auto it = std::begin(v) + stride; it <= std::end(v) - stride;
-       it += stride) {
-    *(it) += 0.5 * (*(it - Pstride) + *(it + Pstride));
-  }
-  it = v.end() - Pstride - 1;
-  v.back() += 0.5 * (*it); // last element
-}
-
-template <typename Real>
-void interpolate_from_level_nMl(const int l, std::vector<Real> &v) {
-
-  int stride = std::pow(2, l);
-  int Pstride = stride / 2;
-
-  for (auto it = std::begin(v) + stride; it < std::end(v); it += stride) {
-    *(it - Pstride) = 0.5 * (*(it - stride) + *it);
-  }
-}
-
-template <typename Real>
-void print_level_2D(const int nrow, const int ncol, const int l, Real *v) {
-
-  int stride = std::pow(2, l);
-
-  for (int irow = 0; irow < nrow; irow += stride) {
-    // std::cout  << "\n";
-    for (int jcol = 0; jcol < ncol; jcol += stride) {
-      // std::cout  << v[get_index (ncol, irow, jcol)] << "\t";
-    }
-    // std::cout  << "\n";
-  }
-}
-
-template <typename Real>
-void write_level_2D(const int nrow, const int ncol, const int l, Real *v,
-                    std::ofstream &outfile) {
-  int stride = std::pow(2, l);
-  //  int nrow = std::pow(2, nlevel_row) + 1;
-  // int ncol = std::pow(2, nlevel_col) + 1;
-
-  for (int irow = 0; irow < nrow; irow += stride) {
-    for (int jcol = 0; jcol < ncol; jcol += stride) {
-      outfile.write(reinterpret_cast<char *>(&v[get_index(ncol, irow, jcol)]),
-                    sizeof(Real));
-    }
-  }
-}
-
-template <typename Real>
-void write_level_2D_exc(const int nrow, const int ncol, const int l, Real *v,
-                        std::ofstream &outfile) {
-  // Write P_l\P_{l-1}
-
-  int stride = std::pow(2, l);
-  int Cstride = stride * 2;
-
-  int row_counter = 0;
-
-  for (int irow = 0; irow < nrow; irow += stride) {
-    if (row_counter % 2 == 0) {
-      for (int jcol = Cstride; jcol < ncol; jcol += Cstride) {
-        outfile.write(
-            reinterpret_cast<char *>(&v[get_index(ncol, irow, jcol - stride)]),
-            sizeof(Real));
-      }
-    } else {
-      for (int jcol = 0; jcol < ncol; jcol += stride) {
-        outfile.write(reinterpret_cast<char *>(&v[get_index(ncol, irow, jcol)]),
-                      sizeof(Real));
-      }
-    }
-    ++row_counter;
-  }
-}
-
-template <typename Real> void pi_lminus1(const int l, std::vector<Real> &v0) {
-  int nlevel = nlevel_from_size(v0.size());
-  int my_level = nlevel - l;
-  int stride = std::pow(2, l); // current stride
-  //  int Pstride = stride/2; //finer stride
-  int Cstride = stride * 2; // coarser stride
-
-  if (my_level != 0) {
-    for (auto it0 = v0.begin() + Cstride; it0 < v0.end(); it0 += Cstride) {
-      *(it0 - stride) -= 0.5 * (*it0 + *(it0 - Cstride));
-    }
-  }
-}
-// Gary New
-template <typename Real>
-void pi_Ql(const int ncol, const int l, Real *v, std::vector<Real> &row_vec) {
-  // Restrict data to coarser level
-
-  int stride = std::pow(2, l); // current stride
-  //  int Pstride = stride/2; //finer stride
-  int Cstride = stride * 2; // coarser stride
-
-  //  std::vector<Real> row_vec(ncol), col_vec(nrow)   ;
-
-  for (int jcol = 0; jcol < ncol; ++jcol) {
-    row_vec[jcol] = v[jcol];
+  // The system size is `n`, but we don't need to store the final divisor. In
+  // the notation above, this vector will be [b_1, …, b_{n - 1}]` (after the
+  // modification in the forward sweep).
+  Real *p = v;
+  std::vector<Real> divisors(n - 1);
+  typename std::vector<Real>::iterator d = divisors.begin();
+  // This is `b_{i - 1}`.
+  Real previous_divisor = *d = 2;
+  // This is `d_{i - 1}`.
+  Real previous_entry = *p;
+  p += stride;
+  // Forward sweep (except for last entry).
+  for (std::size_t i = 1; i + 1 < n; ++i) {
+    // The numerator is really `a`.
+    const Real w = 1 / previous_divisor;
+    // The last term is really `w * c`.
+    previous_divisor = *++d = 4 - w;
+    previous_entry = *p -= w * previous_entry;
+    p += stride;
   }
 
-  pi_lminus1(l, row_vec);
-
-  for (int jcol = 0; jcol < ncol; ++jcol) {
-    v[jcol] = row_vec[jcol];
-  }
-}
-
-template <typename Real>
-void pi_Ql(const int nrow, const int ncol, const int l, Real *v,
-           std::vector<Real> &row_vec, std::vector<Real> &col_vec) {
-  // Restrict data to coarser level
-
-  int stride = std::pow(2, l); // current stride
-  //  int Pstride = stride/2; //finer stride
-  int Cstride = stride * 2; // coarser stride
-
-  //  std::vector<Real> row_vec(ncol), col_vec(nrow)   ;
-
-  for (int irow = 0; irow < nrow;
-       irow += Cstride) // Do the rows existing  in the coarser level
+  // Forward sweep (last entry) and start of backward sweep (first entry).
   {
-    for (int jcol = 0; jcol < ncol; ++jcol) {
-      row_vec[jcol] = v[get_index(ncol, irow, jcol)];
-    }
-
-    pi_lminus1(l, row_vec);
-
-    for (int jcol = 0; jcol < ncol; ++jcol) {
-      v[get_index(ncol, irow, jcol)] = row_vec[jcol];
-    }
+    // The numerator is really `a`.
+    const Real w = 1 / previous_divisor;
+    // Don't need to update `previous_divisor` and `previous_entry` as we won't
+    // be using them.
+    Real &entry = *p;
+    entry -= w * previous_entry;
+    // Don't need need to write to `*d` or increment `d` as we're using the
+    // divisor immediately.
+    // The last term is really `w * c`.
+    previous_entry = entry /= 2 - w;
+    p -= stride;
   }
 
-  if (nrow > 1) {
-    for (int jcol = 0; jcol < ncol;
-         jcol += Cstride) // Do the columns existing  in the coarser level
-    {
-      for (int irow = 0; irow < nrow; ++irow) {
-        col_vec[irow] = v[get_index(ncol, irow, jcol)];
-      }
+  // Backward sweep (remaining entries).
+  for (std::size_t i = 1; i < n; ++i) {
+    Real &entry = *p;
+    // The subtrahend is really `c * previous_entry`.
+    entry -= previous_entry;
+    previous_entry = entry /= *d--;
+    *(p + stride) /= factor;
+    p -= stride;
+  }
+  *(p + stride) /= factor;
+}
 
-      pi_lminus1(l, col_vec);
+template <std::size_t N, typename Real>
+void restriction(const TensorMeshHierarchy<N, Real> &hierarchy,
+                 const int index_difference, const std::size_t dimension,
+                 Real *const v) {
+  if (!index_difference) {
+    throw std::domain_error("cannot restrict from the finest level");
+  }
+  const std::size_t l = hierarchy.l(index_difference);
+  // The capitalization here comes from the convention that lowercase names
+  // correspond to coarser meshes and uppercase names correspond to finer
+  // meshes. Confusingly, `STRIDE` is actually smaller than `stride`.
+  const std::size_t stride = hierarchy.stride(l, dimension);
+  const std::size_t STRIDE = hierarchy.stride(l + 1, dimension);
+  const std::size_t n = hierarchy.meshes.at(l).shape.at(dimension);
 
-      for (int irow = 0; irow < nrow; ++irow) {
-        v[get_index(ncol, irow, jcol)] = col_vec[irow];
-      }
-    }
+  Real left, right;
+  Real *p = v;
+  right = *(p + STRIDE);
+  *p += 0.5 * right;
+  p += stride;
+  for (std::size_t i = 1; i + 1 < n; ++i) {
+    left = right;
+    right = *(p + STRIDE);
+    *p += 0.5 * (left + right);
+    p += stride;
+  }
+  left = right;
+  *p += 0.5 * left;
+}
 
-    // Now the new-new stuff
+template <std::size_t N, typename Real>
+void interpolate_old_to_new_and_overwrite(
+    const TensorMeshHierarchy<N, Real> &hierarchy, const int index_difference,
+    const std::size_t dimension, Real *const v) {
+  if (!index_difference) {
+    throw std::domain_error("cannot interpolate from the finest level");
+  }
+  const std::size_t l = hierarchy.l(index_difference);
+  // See note on capitalization in `restriction`.
+  const std::size_t stride = hierarchy.stride(l, dimension);
+  const std::size_t STRIDE = hierarchy.stride(l + 1, dimension);
+  const std::size_t n = hierarchy.meshes.at(l).shape.at(dimension);
 
-    for (int irow = Cstride; irow <= nrow - 1 - Cstride; irow += 2 * Cstride) {
-      for (int jcol = Cstride; jcol <= ncol - 1 - Cstride;
-           jcol += 2 * Cstride) {
-        v[get_index(ncol, irow - stride, jcol - stride)] -=
-            0.25 * (v[get_index(ncol, irow - Cstride, jcol - Cstride)] +
-                    v[get_index(ncol, irow - Cstride, jcol)] +
-                    v[get_index(ncol, irow, jcol)] +
-                    v[get_index(ncol, irow, jcol - Cstride)]);
-
-        v[get_index(ncol, irow - stride, jcol + stride)] -=
-            0.25 * (v[get_index(ncol, irow - Cstride, jcol)] +
-                    v[get_index(ncol, irow - Cstride, jcol + Cstride)] +
-                    v[get_index(ncol, irow, jcol + Cstride)] +
-                    v[get_index(ncol, irow, jcol)]);
-
-        v[get_index(ncol, irow + stride, jcol + stride)] -=
-            0.25 * (v[get_index(ncol, irow, jcol)] +
-                    v[get_index(ncol, irow, jcol + Cstride)] +
-                    v[get_index(ncol, irow + Cstride, jcol + Cstride)] +
-                    v[get_index(ncol, irow + Cstride, jcol)]);
-
-        v[get_index(ncol, irow + stride, jcol - stride)] -=
-            0.25 * (v[get_index(ncol, irow, jcol - Cstride)] +
-                    v[get_index(ncol, irow, jcol)] +
-                    v[get_index(ncol, irow + Cstride, jcol)] +
-                    v[get_index(ncol, irow + Cstride, jcol - Cstride)]);
-      }
-    }
+  Real *q = v;
+  Real left = *q;
+  q += stride;
+  Real *p = v + STRIDE;
+  for (std::size_t i = 1; i < n; ++i) {
+    const Real right = *q;
+    *p = 0.5 * (left + right);
+    left = right;
+    q += stride;
+    // Might be better to think of this as advancing by `STRIDE` twice.
+    p += stride;
   }
 }
 
-template <typename Real>
-void assign_num_level(const int nrow, const int ncol, const int l, Real *v,
-                      Real num) {
-  // set the value of nodal values at level l to number num
+template <std::size_t N, typename Real>
+void interpolate_old_to_new_and_subtract(
+    const TensorMeshHierarchy<N, Real> &hierarchy, const int index_difference,
+    const std::size_t dimension, Real *const v) {
+  const std::size_t l = hierarchy.l(index_difference);
+  if (!l) {
+    throw std::domain_error("cannot interpolate from the coarsest level");
+  }
+  const std::size_t STRIDE = hierarchy.stride(l, dimension);
+  const std::size_t stride = hierarchy.stride(l - 1, dimension);
+  const std::size_t n = hierarchy.meshes.at(l - 1).shape.at(dimension);
 
-  int stride = std::pow(2, l); // current stride
-
-  for (int irow = 0; irow < nrow; irow += stride) {
-    for (int jcol = 0; jcol < ncol; jcol += stride) {
-      v[get_index(ncol, irow, jcol)] = num;
-    }
+  Real *q = v;
+  Real left = *q;
+  q += stride;
+  Real *p = v + STRIDE;
+  for (std::size_t i = 1; i < n; ++i) {
+    const Real right = *q;
+    *p -= 0.5 * (left + right);
+    left = right;
+    q += stride;
+    p += stride;
   }
 }
 
-template <typename Real>
-void copy_level(const int nrow, const int ncol, const int l, Real *v,
-                std::vector<Real> &work) {
-
-  int stride = std::pow(2, l); // current stride
-
-  for (int irow = 0; irow < nrow; irow += stride) {
-    for (int jcol = 0; jcol < ncol; jcol += stride) {
-      work[get_index(ncol, irow, jcol)] = v[get_index(ncol, irow, jcol)];
-    }
+template <std::size_t N, typename Real>
+void interpolate_old_to_new_and_subtract(
+    const TensorMeshHierarchy<N, Real> &hierarchy, const int index_difference,
+    Real *const v) {
+  const std::size_t l = hierarchy.l(index_difference);
+  if (!l) {
+    throw std::domain_error("cannot interpolate from the coarsest level");
   }
-}
+  const std::size_t STRIDE = stride_from_index_difference(index_difference);
+  const std::size_t stride = stride_from_index_difference(index_difference + 1);
 
-template <typename Real>
-void add_level(const int nrow, const int ncol, const int l, Real *v,
-               Real *work) {
-  // v += work at level l
-
-  int stride = std::pow(2, l); // current stride
-
-  for (int irow = 0; irow < nrow; irow += stride) {
-    for (int jcol = 0; jcol < ncol; jcol += stride) {
-      v[get_index(ncol, irow, jcol)] += work[get_index(ncol, irow, jcol)];
-    }
+  const std::array<std::size_t, N> &shape = hierarchy.meshes.back().shape;
+  const Dimensions2kPlus1<N> dims(shape);
+  if (!dims.is_2kplus1()) {
+    throw std::domain_error("dimensions must all be of the form `2^k + 1`");
   }
-}
+  // It'd be nice to somehow use `LevelValues` here. We might like to write
+  // something like `SituatedCoefficientRange` so we get the multiindices along
+  // with the values. For now we'll iterate over the multiindices and fetch the
+  // values ourselves.
+  // Now that `LevelValues` has been replaced by `TensorLevelValues`, it is now
+  // possible to do the above. Holding off as I expect to delete this function.
+  // Still holding off now as `TensorLevelValues` itself is being replaced.
+  const MultiindexRectangle<N> rectangle(shape);
 
-template <typename Real>
-void subtract_level(const int nrow, const int ncol, const int l, Real *v,
-                    Real *work) {
-  // v += work at level l
-  int stride = std::pow(2, l); // current stride
-
-  for (int irow = 0; irow < nrow; irow += stride) {
-    for (int jcol = 0; jcol < ncol; jcol += stride) {
-      v[get_index(ncol, irow, jcol)] -= work[get_index(ncol, irow, jcol)];
-    }
-  }
-}
-
-template <typename Real>
-void compute_correction_loadv(const int l, std::vector<Real> &v) {
-  int stride = std::pow(2, l); // current stride
-  int Pstride = stride / 2;    // finer stride
-
-  auto it = v.begin() + Pstride;
-  v.front() += 0.25 * (*it); // first element
-  for (auto it = std::begin(v) + stride; it <= std::end(v) - stride;
-       it += stride) {
-    *(it) += 0.25 * (*(it - Pstride) + *(it + Pstride));
-  }
-  it = v.end() - Pstride - 1;
-  v.back() += 0.25 * (*it); // last element
-}
-
-template <typename Real>
-void qwrite_level_2D(const int nrow, const int ncol, const int nlevel,
-                     const int l, Real *v, const Real tol,
-                     const std::string outfile) {
-
-  int stride = std::pow(2, l);
-
-  Real norm = 0;
-
-  for (int irow = 0; irow < nrow; irow += stride) {
-    for (int jcol = 0; jcol < ncol; jcol += stride) {
-      Real ntest = std::abs(v[get_index(ncol, irow, jcol)]);
-      if (ntest > norm)
-        norm = ntest;
-    }
-  }
-
-  const mgard::LinearQuantizer<Real, int> quantizer(norm * tol / (nlevel + 1));
-
-  gzFile out_file = gzopen(outfile.c_str(), "w9b");
-  gzwrite(out_file, &quantizer.quantum, sizeof(Real));
-
-  int prune_count = 0;
-
-  for (int l = 0; l <= nlevel; l++) {
-    int stride = std::pow(2, l);
-    int Cstride = stride * 2;
-    int row_counter = 0;
-
-    for (int irow = 0; irow < nrow; irow += stride) {
-      if (row_counter % 2 == 0 && l != nlevel) {
-        for (int jcol = Cstride; jcol < ncol; jcol += Cstride) {
-          const int n = quantizer(v[get_index(ncol, irow, jcol - stride)]);
-          if (n == 0)
-            ++prune_count;
-          gzwrite(out_file, &n, sizeof(int));
-        }
+  // We're splitting the grid into 'boxes' with 'lower left' corner `alpha` and
+  // side length `stride` (so containing (in each dimension) `stride + 1` points
+  // – the second parameter to the `MultiindexRectangle` constructor is an array
+  // of sizes (rather than 'lengths'), so `stride + 1` is what we use) (except
+  // for the boxes at the far boundaries, which will be smaller). We iterate
+  // over the corners of each box (`beta`) to calculate the interpolant at the
+  // interior points (`BETA`). We only want to adjust the values on the 'new'
+  // nodes, so we need to skip any `BETA` that is also a `beta`. Additionally,
+  // some `BETA`s straddle multiple boxes, and we must take care to adjust the
+  // values at those multiindices only once. We do this dealing with `BETA` at
+  // the 'minimum' (elementwise – think 'lower left') `alpha`.
+  for (const std::array<std::size_t, N> alpha : rectangle.indices(stride)) {
+    // Shape to use in iterating over `beta`s. In particular, we need to include
+    // the 'far' corners (in 2D, the 'upper right' corner).
+    std::array<std::size_t, N> minishape;
+    // Shape to use in iterating over `BETA`s. We only include the 'far' corners
+    // if we've reached the 'far' edge of `rectangle`.
+    std::array<std::size_t, N> MINISHAPE;
+    for (std::size_t i = 0; i < N; ++i) {
+      std::size_t &m = minishape.at(i);
+      std::size_t &M = MINISHAPE.at(i);
+      if (alpha.at(i) + stride <= shape.at(i)) {
+        // Do include the 'far' 'old' nodes.
+        m = stride + 1;
+        // Do not include the 'far' 'new' nodes.
+        M = stride;
       } else {
-        for (int jcol = 0; jcol < ncol; jcol += stride) {
-          const int n = quantizer(v[get_index(ncol, irow, jcol)]);
-          if (n == 0)
-            ++prune_count;
-          gzwrite(out_file, &n, sizeof(int));
+        // This relies on there never being more than `1` but fewer than `stride
+        // + 1` nodes, which is a result of the dimensions being of the form
+        // `2^k + 1`.
+        m = 1;
+        M = 1;
+      }
+    }
+    const MultiindexRectangle<N> minirectangle(alpha, minishape);
+    const MultiindexRectangle<N> MINIRECTANGLE(alpha, MINISHAPE);
+    for (const std::array<std::size_t, N> BETA :
+         MINIRECTANGLE.indices(STRIDE)) {
+      // Check that `BETA` is the multiindex of a 'new' node.
+      bool BETA_is_new = false;
+      for (std::size_t i = 0; i < N; ++i) {
+        if (BETA.at(i) == alpha.at(i) + STRIDE) {
+          BETA_is_new = true;
+          break;
         }
       }
-      ++row_counter;
+      if (!BETA_is_new) {
+        continue;
+      }
+      Real interpolant = 0;
+      for (const std::array<std::size_t, N> beta :
+           minirectangle.indices(stride)) {
+        Real weight = 1;
+        for (std::size_t i = 0; i < N; ++i) {
+          Real factor;
+          const std::size_t B = BETA.at(i);
+          if (B == alpha.at(i) + STRIDE) {
+            factor = 0.5;
+          } else if (B == beta.at(i)) {
+            factor = 1;
+          } else {
+            factor = 0;
+          }
+          weight *= factor;
+        }
+        interpolant += weight * hierarchy.at(v, beta);
+      }
+      hierarchy.at(v, BETA) -= interpolant;
     }
   }
-
-  // std::cout  << "Pruned : " << prune_count << " Reduction : "
-  //            << (Real)nrow * ncol / (nrow * ncol - prune_count) << "\n";
-  gzclose(out_file);
 }
 
-template <typename Real>
-void quantize_2D_interleave(const int nrow, const int ncol, Real *v,
-                            std::vector<int> &work, const Real norm,
-                            const Real tol) {
-  const int size_ratio = sizeof(Real) / sizeof(int);
-
-  //    Real quantizer = 2.0*norm * tol;
-  const mgard::LinearQuantizer<Real, int> quantizer(norm * tol);
-  ////std::cout  << "Quantization factor: " << quantizer << "\n";
-  std::memcpy(work.data(), &quantizer.quantum, sizeof(Real));
-
-  int prune_count = 0;
-
-  for (int index = 0; index < ncol * nrow; ++index) {
-    const int n = quantizer(v[index]);
-    work[index + size_ratio] = n;
-    if (n == 0)
-      ++prune_count;
+template <std::size_t N, typename Real>
+void assign_num_level(const TensorMeshHierarchy<N, Real> &hierarchy,
+                      const int l, Real *const v, const Real num) {
+  for (const mgard::TensorNode<N, Real> node :
+       hierarchy.nodes(hierarchy.L - l)) {
+    hierarchy.at(v, node.multiindex) = num;
   }
-
-  ////std::cout  << "Pruned : " << prune_count << " Reduction : "
-  //          << (Real)2 * nrow * ncol / (nrow * ncol - prune_count) << "\n";
 }
 
-template <typename Real>
-void dequantize_2D_interleave(const int nrow, const int ncol, Real *v,
-                              const std::vector<int> &work) {
-  const int size_ratio = sizeof(Real) / sizeof(int);
+template <std::size_t N, typename Real>
+void copy_level(const TensorMeshHierarchy<N, Real> &hierarchy, const int l,
+                Real const *const v, Real *const work) {
+  for (const mgard::TensorNode<N, Real> node :
+       hierarchy.nodes(hierarchy.L - l)) {
+    hierarchy.at(work, node.multiindex) = hierarchy.at(v, node.multiindex);
+  }
+}
+
+template <std::size_t N, typename Real>
+void add_level(const TensorMeshHierarchy<N, Real> &hierarchy, const int l,
+               Real *const v, Real const *const work) {
+  for (const mgard::TensorNode<N, Real> node :
+       hierarchy.nodes(hierarchy.L - l)) {
+    hierarchy.at(v, node.multiindex) += hierarchy.at(work, node.multiindex);
+  }
+}
+
+template <std::size_t N, typename Real>
+void subtract_level(const TensorMeshHierarchy<N, Real> &hierarchy, const int l,
+                    Real *const v, Real const *const work) {
+  for (const mgard::TensorNode<N, Real> node :
+       hierarchy.nodes(hierarchy.L - l)) {
+    hierarchy.at(v, node.multiindex) -= hierarchy.at(work, node.multiindex);
+  }
+}
+
+template <std::size_t N, typename Real>
+void quantize_interleave(const TensorMeshHierarchy<N, Real> &hierarchy,
+                         Real const *const v, int *const work, const Real norm,
+                         const Real tol) {
+  static_assert(sizeof(Real) % sizeof(int) == 0,
+                "`int` size does not divide `Real` size");
+  const std::size_t size_ratio = sizeof(Real) / sizeof(int);
+  const mgard::LinearQuantizer<Real, int> quantizer(norm * tol);
+  std::memcpy(work, &quantizer.quantum, sizeof(Real));
+  for (std::size_t index = 0; index < hierarchy.ndof(); ++index) {
+    work[size_ratio + index] = quantizer(v[index]);
+  }
+}
+
+template <std::size_t N, typename Real>
+void dequantize_interleave(const TensorMeshHierarchy<N, Real> &hierarchy,
+                           Real *const v, int const *const work) {
+  static_assert(sizeof(Real) % sizeof(int) == 0,
+                "`int` size does not divide `Real` size");
+  const std::size_t size_ratio = sizeof(Real) / sizeof(int);
 
   Real quantum;
-  std::memcpy(&quantum, work.data(), sizeof(Real));
+  std::memcpy(&quantum, work, sizeof(Real));
   const mgard::LinearDequantizer<int, Real> quantizer(quantum);
 
-  for (int index = 0; index < nrow * ncol; ++index) {
-    v[index] = quantizer(work[index + size_ratio]);
+  for (std::size_t index = 0; index < hierarchy.ndof(); ++index) {
+    v[index] = quantizer(work[size_ratio + index]);
   }
 }
 
@@ -1667,82 +1321,38 @@ void qwrite_2D_interleave(const int nrow, const int ncol, const int nlevel,
   gzclose(out_file);
 }
 
-template <typename Real>
-void qread_level_2D(const int nrow, const int ncol, const int nlevel, Real *v,
-                    std::string infile) {
-  int buff_size = 128 * 1024;
-  unsigned char unzip_buffer[buff_size];
-  int int_buffer[buff_size / sizeof(int)];
-  unsigned int unzipped_bytes, total_bytes = 0;
-
-  Real quantum;
-  gzFile in_file_z = gzopen(infile.c_str(), "r");
-  // std::cout  << in_file_z << "\n";
-
-  unzipped_bytes = gzread(in_file_z, unzip_buffer,
-                          sizeof(Real)); // read the quantization constant
-  std::memcpy(&quantum, &unzip_buffer, unzipped_bytes);
-  const mgard::LinearDequantizer<int, Real> dequantizer(quantum);
-
-  int last = 0;
-  while (true) {
-    unzipped_bytes = gzread(in_file_z, unzip_buffer, buff_size);
-    // std::cout  << unzipped_bytes << "\n";
-    if (unzipped_bytes > 0) {
-      total_bytes += unzipped_bytes;
-      int num_int = unzipped_bytes / sizeof(int);
-
-      std::memcpy(&int_buffer, &unzip_buffer, unzipped_bytes);
-      for (int i = 0; i < num_int; ++i) {
-        v[last] = dequantizer(int_buffer[i]);
-        ++last;
-      }
-    } else {
-      break;
-    }
-  }
-
-  gzclose(in_file_z);
-}
-
-//       unzippedBytes = gzread(inFileZ, unzipBuffer, buff_size);
-//       //std::cout  << "Read: "<< unzippedBytes <<"\n";
-//       std::memcpy(&v[irow][0], &unzipBuffer, unzippedBytes);
-//     }
-
-//   gzclose(inFileZ);
-// }
 // Gary New
 template <typename Real>
 void refactor_1D(const int ncol, const int l_target, Real *v,
                  std::vector<Real> &work, std::vector<Real> &row_vec) {
+  const TensorMeshHierarchy<1, Real> hierarchy({ncol});
   for (int l = 0; l < l_target; ++l) {
 
     int stride = std::pow(2, l); // current stride
     int Cstride = stride * 2;    // coarser stride
 #if 1
-    pi_Ql(ncol, l, v, row_vec); // rename!. v@l has I-\Pi_l Q_l+1 u
+    interpolate_old_to_new_and_subtract(hierarchy, l, 0, v);
 #endif
-    copy_level(1, ncol, l, v,
-               work); // copy the nodal values of v on l  to matrix work
+    // copy the nodal values of v on l  to matrix work
+    copy_level(hierarchy, l, v, work.data());
 
-    assign_num_level(1, ncol, l + 1, work.data(), static_cast<Real>(0.0));
+    assign_num_level(hierarchy, l + 1, work.data(), static_cast<Real>(0.0));
 
     for (int jcol = 0; jcol < ncol; ++jcol) {
       row_vec[jcol] = work[jcol];
     }
 
-    mass_matrix_multiply(l, row_vec);
+    mass_matrix_multiply(hierarchy, l, 0, row_vec.data());
 
-    restriction(l + 1, row_vec);
+    restriction(hierarchy, l + 1, 0, row_vec.data());
 
-    solve_tridiag_M(l + 1, row_vec);
+    solve_tridiag_M(hierarchy, l + 1, 0, row_vec.data());
 
     for (int jcol = 0; jcol < ncol; ++jcol) {
       work[jcol] = row_vec[jcol];
     }
 
-    add_level(1, ncol, l + 1, v, work.data()); // Qu_l = \Pi_l Q_{l+1}u + z_l
+    add_level(hierarchy, l + 1, v, work.data()); // Qu_l = \Pi_l Q_{l+1}u + z_l
   }
 }
 
@@ -1750,6 +1360,7 @@ template <typename Real>
 void refactor(const int nrow, const int ncol, const int l_target, Real *v,
               std::vector<Real> &work, std::vector<Real> &row_vec,
               std::vector<Real> &col_vec) {
+  const TensorMeshHierarchy<2, Real> hierarchy({nrow, ncol});
   // refactor
   //  //std::cout  << "refactoring" << "\n";
 
@@ -1758,12 +1369,11 @@ void refactor(const int nrow, const int ncol, const int l_target, Real *v,
     int stride = std::pow(2, l); // current stride
     int Cstride = stride * 2;    // coarser stride
 
-    pi_Ql(nrow, ncol, l, v, row_vec,
-          col_vec); // rename!. v@l has I-\Pi_l Q_l+1 u
-    copy_level(nrow, ncol, l, v,
-               work); // copy the nodal values of v on l  to matrix work
+    interpolate_old_to_new_and_subtract(hierarchy, l, v);
+    // copy the nodal values of v on l  to matrix work
+    copy_level(hierarchy, l, v, work.data());
 
-    assign_num_level(nrow, ncol, l + 1, work.data(), static_cast<Real>(0.0));
+    assign_num_level(hierarchy, l + 1, work.data(), static_cast<Real>(0.0));
 
     // row-sweep
     for (int irow = 0; irow < nrow; ++irow) {
@@ -1771,11 +1381,11 @@ void refactor(const int nrow, const int ncol, const int l_target, Real *v,
         row_vec[jcol] = work[get_index(ncol, irow, jcol)];
       }
 
-      mass_matrix_multiply(l, row_vec);
+      mass_matrix_multiply(hierarchy, l, 1, row_vec.data());
 
-      restriction(l + 1, row_vec);
+      restriction(hierarchy, l + 1, 1, row_vec.data());
 
-      solve_tridiag_M(l + 1, row_vec);
+      solve_tridiag_M(hierarchy, l + 1, 1, row_vec.data());
 
       for (int jcol = 0; jcol < ncol; ++jcol) {
         work[get_index(ncol, irow, jcol)] = row_vec[jcol];
@@ -1790,10 +1400,10 @@ void refactor(const int nrow, const int ncol, const int l_target, Real *v,
           col_vec[irow] = work[get_index(ncol, irow, jcol)];
         }
 
-        mass_matrix_multiply(l, col_vec);
+        mass_matrix_multiply(hierarchy, l, 0, col_vec.data());
 
-        restriction(l + 1, col_vec);
-        solve_tridiag_M(l + 1, col_vec);
+        restriction(hierarchy, l + 1, 0, col_vec.data());
+        solve_tridiag_M(hierarchy, l + 1, 0, col_vec.data());
 
         for (int irow = 0; irow < nrow; ++irow) {
           work[get_index(ncol, irow, jcol)] = col_vec[irow];
@@ -1803,8 +1413,8 @@ void refactor(const int nrow, const int ncol, const int l_target, Real *v,
 
     // Solved for (z_l, phi_l) = (c_{l+1}, vl)
 
-    add_level(nrow, ncol, l + 1, v,
-              work.data()); // Qu_l = \Pi_l Q_{l+1}u + z_l
+    // Qu_l = \Pi_l Q_{l+1}u + z_l
+    add_level(hierarchy, l + 1, v, work.data());
   }
 }
 
@@ -1812,6 +1422,7 @@ void refactor(const int nrow, const int ncol, const int l_target, Real *v,
 template <typename Real>
 void recompose_1D(const int ncol, const int l_target, Real *v,
                   std::vector<Real> &work, std::vector<Real> &row_vec) {
+  const TensorMeshHierarchy<1, Real> hierarchy({ncol});
 
   // recompose
 
@@ -1820,42 +1431,41 @@ void recompose_1D(const int ncol, const int l_target, Real *v,
     int stride = std::pow(2, l); // current stride
     int Pstride = stride / 2;
 
-    copy_level(1, ncol, l - 1, v, work); // copy the nodal values of cl
-                                         // on l-1 (finer level)  to
-                                         // matrix work
+    // copy the nodal values of cl on l-1 (finer level) to matrix work
+    copy_level(hierarchy, l - 1, v, work.data());
     // zero out nodes of l on cl
-    assign_num_level(1, ncol, l, work.data(), static_cast<Real>(0.0));
+    assign_num_level(hierarchy, l, work.data(), static_cast<Real>(0.0));
 
     // row-sweep
     for (int jcol = 0; jcol < ncol; ++jcol) {
       row_vec[jcol] = work[jcol];
     }
 
-    mass_matrix_multiply(l - 1, row_vec);
+    mass_matrix_multiply(hierarchy, l - 1, 0, row_vec.data());
 
-    restriction(l, row_vec);
-    solve_tridiag_M(l, row_vec);
+    restriction(hierarchy, l, 0, row_vec.data());
+    solve_tridiag_M(hierarchy, l, 0, row_vec.data());
 
     for (int jcol = 0; jcol < ncol; ++jcol) {
       work[jcol] = row_vec[jcol];
     }
 
-    subtract_level(1, ncol, l, work.data(), v); // do -(Qu - zl)
+    subtract_level(hierarchy, l, work.data(), v); // do -(Qu - zl)
 
     // row-sweep
     for (int jcol = 0; jcol < ncol; ++jcol) {
       row_vec[jcol] = work[jcol];
     }
 
-    interpolate_from_level_nMl(l, row_vec);
+    interpolate_old_to_new_and_overwrite(hierarchy, l, 0, row_vec.data());
 
     for (int jcol = 0; jcol < ncol; ++jcol) {
       work[jcol] = row_vec[jcol];
     }
 
     // zero out nodes of l on cl
-    assign_num_level(1, ncol, l, v, static_cast<Real>(0.0));
-    subtract_level(1, ncol, l - 1, v, work.data());
+    assign_num_level(hierarchy, l, v, static_cast<Real>(0.0));
+    subtract_level(hierarchy, l - 1, v, work.data());
   }
 }
 
@@ -1863,6 +1473,7 @@ template <typename Real>
 void recompose(const int nrow, const int ncol, const int l_target, Real *v,
                std::vector<Real> &work, std::vector<Real> &row_vec,
                std::vector<Real> &col_vec) {
+  const TensorMeshHierarchy<2, Real> hierarchy({nrow, ncol});
 
   // recompose
 
@@ -1871,11 +1482,10 @@ void recompose(const int nrow, const int ncol, const int l_target, Real *v,
     int stride = std::pow(2, l); // current stride
     int Pstride = stride / 2;
 
-    copy_level(nrow, ncol, l - 1, v, work); // copy the nodal values of cl
-                                            // on l-1 (finer level)  to
-                                            // matrix work
+    // copy the nodal values of cl on l-1 (finer level) to matrix work
+    copy_level(hierarchy, l - 1, v, work.data());
     // zero out nodes of l on cl
-    assign_num_level(nrow, ncol, l, work.data(), static_cast<Real>(0.0));
+    assign_num_level(hierarchy, l, work.data(), static_cast<Real>(0.0));
 
     // row-sweep
     for (int irow = 0; irow < nrow; ++irow) {
@@ -1883,10 +1493,10 @@ void recompose(const int nrow, const int ncol, const int l_target, Real *v,
         row_vec[jcol] = work[get_index(ncol, irow, jcol)];
       }
 
-      mass_matrix_multiply(l - 1, row_vec);
+      mass_matrix_multiply(hierarchy, l - 1, 1, row_vec.data());
 
-      restriction(l, row_vec);
-      solve_tridiag_M(l, row_vec);
+      restriction(hierarchy, l, 1, row_vec.data());
+      solve_tridiag_M(hierarchy, l, 1, row_vec.data());
 
       for (int jcol = 0; jcol < ncol; ++jcol) {
         work[get_index(ncol, irow, jcol)] = row_vec[jcol];
@@ -1901,17 +1511,17 @@ void recompose(const int nrow, const int ncol, const int l_target, Real *v,
           col_vec[irow] = work[get_index(ncol, irow, jcol)];
         }
 
-        mass_matrix_multiply(l - 1, col_vec);
+        mass_matrix_multiply(hierarchy, l - 1, 0, col_vec.data());
 
-        restriction(l, col_vec);
-        solve_tridiag_M(l, col_vec);
+        restriction(hierarchy, l, 0, col_vec.data());
+        solve_tridiag_M(hierarchy, l, 0, col_vec.data());
 
         for (int irow = 0; irow < nrow; ++irow) {
           work[get_index(ncol, irow, jcol)] = col_vec[irow];
         }
       }
     }
-    subtract_level(nrow, ncol, l, work.data(), v); // do -(Qu - zl)
+    subtract_level(hierarchy, l, work.data(), v); // do -(Qu - zl)
 
     // row-sweep
     for (int irow = 0; irow < nrow; irow += stride) {
@@ -1919,7 +1529,7 @@ void recompose(const int nrow, const int ncol, const int l_target, Real *v,
         row_vec[jcol] = work[get_index(ncol, irow, jcol)];
       }
 
-      interpolate_from_level_nMl(l, row_vec);
+      interpolate_old_to_new_and_overwrite(hierarchy, l, 0, row_vec.data());
 
       for (int jcol = 0; jcol < ncol; ++jcol) {
         work[get_index(ncol, irow, jcol)] = row_vec[jcol];
@@ -1934,7 +1544,7 @@ void recompose(const int nrow, const int ncol, const int l_target, Real *v,
           col_vec[irow] = work[get_index(ncol, irow, jcol)];
         }
 
-        interpolate_from_level_nMl(l, col_vec);
+        interpolate_old_to_new_and_overwrite(hierarchy, l, 0, col_vec.data());
 
         for (int irow = 0; irow < nrow; ++irow) {
           work[get_index(ncol, irow, jcol)] = col_vec[irow];
@@ -1942,224 +1552,163 @@ void recompose(const int nrow, const int ncol, const int l_target, Real *v,
       }
     }
     // zero out nodes of l on cl
-    assign_num_level(nrow, ncol, l, v, static_cast<Real>(0.0));
-    subtract_level(nrow, ncol, l - 1, v, work.data());
+    assign_num_level(hierarchy, l, v, static_cast<Real>(0.0));
+    subtract_level(hierarchy, l - 1, v, work.data());
   }
 }
 
-template <typename Real>
-Real interp_2d(Real q11, Real q12, Real q21, Real q22, Real x1, Real x2,
-               Real y1, Real y2, Real x, Real y) {
-  Real x2x1, y2y1, x2x, y2y, yy1, xx1;
-  x2x1 = x2 - x1;
-  y2y1 = y2 - y1;
-  x2x = x2 - x;
-  y2y = y2 - y;
-  yy1 = y - y1;
-  xx1 = x - x1;
-  return 1.0 / (x2x1 * y2y1) *
-         (q11 * x2x * y2y + q21 * xx1 * y2y + q12 * x2x * yy1 +
-          q22 * xx1 * yy1);
-}
+namespace {
 
-template <typename Real>
-Real interp_0d(const Real x1, const Real x2, const Real y1, const Real y2,
-               const Real x) {
-  // do a linear interpolation between (x1, y1) and (x2, y2)
-  return (((x2 - x) * y1 + (x - x1) * y2) / (x2 - x1));
-}
-
-template <typename Real>
-void resample_1d(const Real *inbuf, Real *outbuf, const int ncol,
-                 const int ncol_new) {
-  Real hx_o = 1.0 / Real(ncol - 1);
-  Real hx = 1.0 / Real(ncol_new - 1); // x-spacing
-  Real hx_ratio = (hx_o / hx);        // ratio of x-spacing resampled/orig
-
-  for (int icol = 0; icol < ncol_new - 1; ++icol) {
-    int i_left = floor(icol / hx_ratio);
-    int i_right = i_left + 1;
-
-    Real x1 = Real(i_left) * hx_o;
-    Real x2 = Real(i_right) * hx_o;
-
-    Real y1 = inbuf[i_left];
-    Real y2 = inbuf[i_right];
-    Real x = Real(icol) * hx;
-    //      //std::cout  <<  x1 << "\t" << x2 << "\t" << x << "\t"<< "\n";
-    // //std::cout  <<  y1 << "\t" << y2 << "\t" << "\n";
-
-    outbuf[icol] = interp_0d(x1, x2, y1, y2, x);
-    //      std:: cout << mgard_interp_0d( x1,  x2,  y1,  y2,  x) << "\n";
+//! Set the entries corresponding to nodes on some level to zero.
+//!
+//!\param[in] hierarchy Mesh hierarchy on which the function is defined.
+//!\param[out] v Nodal values of the function.
+//!\param[in] l Index of the mesh whose nodes will have their associated entries
+//! set to zero.
+template <std::size_t N, typename Real>
+void set_to_zero_on_level(const TensorMeshHierarchy<N, Real> &hierarchy,
+                          Real *const v, const std::size_t l) {
+  for (const TensorNode<N, Real> node : hierarchy.nodes(l)) {
+    hierarchy.at(v, node.multiindex) = 0;
   }
-
-  outbuf[ncol_new - 1] = inbuf[ncol - 1];
 }
 
-template <typename Real>
-void resample_1d_inv2(const Real *inbuf, Real *outbuf, const int ncol,
-                      const int ncol_new) {
-  Real hx_o = 1.0 / Real(ncol - 1);
-  Real hx = 1.0 / Real(ncol_new - 1); // x-spacing
-  Real hx_ratio = (hx_o / hx);        // ratio of x-spacing resampled/orig
+//! Copy the entries corresponding to nodes on some level.
+//!
+//!\param[in] hierarchy Mesh hierarchy on which the functions are defined.
+//!\param[in] src Source dataset.
+//!\param[out] dst Destination dataset.
+//!\param[in] l Index of the mesh whose nodes will have their associated entries
+//! copied.
+template <std::size_t N, typename Real>
+void copy_on_level(const TensorMeshHierarchy<N, Real> &hierarchy,
+                   Real const *const src, Real *const dst,
+                   const std::size_t l) {
+  for (const TensorNode<N, Real> node : hierarchy.nodes(l)) {
+    hierarchy.at(dst, node.multiindex) = hierarchy.at(src, node.multiindex);
+  }
+}
 
-  for (int icol = 0; icol < ncol_new - 1; ++icol) {
-    int i_left = floor(icol / hx_ratio);
-    int i_right = i_left + 1;
+//! Add a multiple of one set of values to another on some level.
+//!
+//!\param[in] hierarchy Mesh hierarchy on which the functions are defined.
+//!\param[in] alpha Factor by which to scale the first set of values.
+//!\param[in] x Dataset containing the first set of values
+//!\param[in, out] y Dataset containing the second set of values.
+//!\param[in] l Index of the mesh whose nodes will have their associated entries
+//! (in the second dataset) changed.
+template <std::size_t N, typename Real>
+void axpy_on_level(const TensorMeshHierarchy<N, Real> &hierarchy,
+                   const Real alpha, Real const *const x, Real *const y,
+                   const std::size_t l) {
+  for (const TensorNode<N, Real> node : hierarchy.nodes(l)) {
+    hierarchy.at(y, node.multiindex) +=
+        alpha * hierarchy.at(x, node.multiindex);
+  }
+}
 
-    Real x1 = Real(i_left) * hx_o;
-    Real x2 = Real(i_right) * hx_o;
+} // namespace
 
-    Real y1 = inbuf[i_left];
-    Real y2 = inbuf[i_right];
-    Real x = Real(icol) * hx;
-
-    Real d1 = std::pow(x1 - x, 4.0);
-    Real d2 = std::pow(x2 - x, 4.0);
-
-    if (d1 == 0) {
-      outbuf[icol] = y1;
-    } else if (d2 == 0) {
-      outbuf[icol] = y2;
-    } else {
-      Real dsum = 1.0 / d1 + 1.0 / d2;
-      outbuf[icol] = (y1 / d1 + y2 / d2) / dsum;
+template <std::size_t N, typename Real>
+void decompose(const TensorMeshHierarchy<N, Real> &hierarchy, Real *const v) {
+  std::vector<Real> buffer_(hierarchy.ndof());
+  Real *const buffer = buffer_.data();
+  for (std::size_t l = hierarchy.L; l > 0; --l) {
+    // We start with `Q_{l}u` on `nodes(l)` of `v`. First we write zeros to
+    // `nodes(l)` of `buffer` because the values on `new_nodes(l)` must be zero
+    // before we can use the interpolation routine. (Ideally we'd only overwrite
+    // those values.)
+    set_to_zero_on_level(hierarchy, buffer, l);
+    // Then we copy over only the values on `old_nodes(l)`.
+    copy_on_level(hierarchy, v, buffer, l - 1);
+    // Now we have `Π_{l - 1}Q_{l}u` on `old_nodes(l)` of `buffer` and zeros on
+    // `new_nodes(l)` of `buffer`. Time to interpolate.
+    {
+      const TensorProlongationAddition<N, Real> PA(hierarchy, l);
+      PA(buffer);
     }
+    // Now we have `Π_{l - 1}Q_{l}u` on `nodes(l)` (that is, on both
+    // `old_nodes(l)` and `new_nodes(l)`) of `buffer`). Time to subtract the
+    // interpolant (on `buffer`) from the projection (on `v`).
+    axpy_on_level(hierarchy, static_cast<Real>(-1), buffer, v, l);
+    // Now we have `(I - Π_{l - 1})Q_{l}u` on `nodes(l)` of `v`. Ideally we
+    // wouldn't have subtracted on `old_nodes(l)` – let's fix that now.
+    copy_on_level(hierarchy, buffer, v, l - 1);
+    // Now we have `Π_{l - 1}Q_{l}u` on `old_nodes(l)` of `v` and
+    // `(I - Π_{l - 1})Q_{l}u` on `new_nodes(l)` of `v`. Time to project
+    // `(I - Π_{l - 1})Q_{l}u` to the coarse mesh. We begin by copying
+    // `(I - Π_{l - 1})Q_{l}u` to `buffer`. We'll also copy `Π_{l - 1}Q_{l}u`
+    // (on `old_nodes(l)`) (what we just copied from `buffer` to `v`), but we'll
+    // fix that afterwards.
+    copy_on_level(hierarchy, v, buffer, l);
+    // Now we have `Π_{l - 1}Q_{l}u` on `old_nodes(l)` of `buffer` and
+    // `(I - Π_{l - 1})Q_{l}u` on `new_nodes(l)` of `buffer`. Time to zero out
+    // the values on `old_nodes(l)`.
+    set_to_zero_on_level(hierarchy, buffer, l - 1);
+    // Now we have `(I - Π_{l - 1})Q_{l}u` on `nodes(l)` of `buffer`. Time to
+    // project.
+    {
+      const TensorMassMatrix<N, Real> M(hierarchy, l);
+      const TensorRestriction<N, Real> R(hierarchy, l);
+      const TensorMassMatrixInverse<N, Real> m_inv(hierarchy, l - 1);
+      M(buffer);
+      R(buffer);
+      m_inv(buffer);
+    }
+    // Now we have `Q_{l - 1}u - Π_{l - 1}Q_{l}u` on `old_nodes(l)` of `buffer`.
+    // Time to correct `Π_{l - 1}Q_{l}u` on `old_nodes(l)` of `v`.
+    axpy_on_level(hierarchy, static_cast<Real>(1), buffer, v, l - 1);
+    // Now we have `(I - Π_{l - 1})Q_{l}u` on `new_nodes(l)` of `v` and
+    // `Q_{l - 1}u` on `old_nodes(l)` of `v`.
   }
-
-  outbuf[ncol_new - 1] = inbuf[ncol - 1];
 }
 
-template <typename Real>
-void resample_2d(const Real *inbuf, Real *outbuf, const int nrow,
-                 const int ncol, const int nrow_new, const int ncol_new) {
-  Real hx_o = 1.0 / Real(ncol - 1);
-  Real hx = 1.0 / Real(ncol_new - 1); // x-spacing
-  Real hx_ratio = (hx_o / hx);        // ratio of x-spacing resampled/orig
-
-  Real hy_o = 1.0 / Real(nrow - 1);
-  Real hy = 1.0 / Real(nrow_new - 1); // x-spacing
-  Real hy_ratio = (hy_o / hy);        // ratio of x-spacing resampled/orig
-
-  for (int irow = 0; irow < nrow_new - 1; ++irow) {
-    int i_bot = floor(irow / hy_ratio);
-    int i_top = i_bot + 1;
-
-    Real y = Real(irow) * hy;
-    Real y1 = Real(i_bot) * hy_o;
-    Real y2 = Real(i_top) * hy_o;
-
-    for (int jcol = 0; jcol < ncol_new - 1; ++jcol) {
-      int j_left = floor(jcol / hx_ratio);
-      int j_right = j_left + 1;
-
-      Real x = Real(jcol) * hx;
-      Real x1 = Real(j_left) * hx_o;
-      Real x2 = Real(j_right) * hx_o;
-
-      Real q11 = inbuf[get_index(ncol, i_bot, j_left)];
-      Real q12 = inbuf[get_index(ncol, i_top, j_left)];
-      Real q21 = inbuf[get_index(ncol, i_bot, j_right)];
-      Real q22 = inbuf[get_index(ncol, i_top, j_right)];
-
-      outbuf[get_index(ncol_new, irow, jcol)] =
-          interp_2d(q11, q12, q21, q22, x1, x2, y1, y2, x, y);
+template <std::size_t N, typename Real>
+void recompose(const TensorMeshHierarchy<N, Real> &hierarchy, Real *const v) {
+  std::vector<Real> buffer_(hierarchy.ndof());
+  Real *const buffer = buffer_.data();
+  for (std::size_t l = 1; l <= hierarchy.L; ++l) {
+    // We start with `Q_{l - 1}u` on `old_nodes(l)` of `v` and
+    // `(I - Π_{l - 1})Q_{l}u` on `new_nodes(l)` of `v`. We begin by copying
+    // `(I - Π_{l - 1})Q_{l}u` to `buffer`.
+    // We could probably avoid this initial copy by copying all of `v` (on
+    // `nodes(L)`) to `buffer` at the start.
+    copy_on_level(hierarchy, v, buffer, l);
+    set_to_zero_on_level(hierarchy, buffer, l - 1);
+    // Now we have `(I - Π_{l - 1})Q_{l}u` on `nodes(l)` of `buffer`. Time to
+    // project.
+    {
+      const TensorMassMatrix<N, Real> M(hierarchy, l);
+      const TensorRestriction<N, Real> R(hierarchy, l);
+      const TensorMassMatrixInverse<N, Real> m_inv(hierarchy, l - 1);
+      M(buffer);
+      R(buffer);
+      m_inv(buffer);
     }
-
-    // last column
-    Real q1 = inbuf[get_index(ncol, i_bot, ncol - 1)];
-    Real q2 = inbuf[get_index(ncol, i_top, ncol - 1)];
-    outbuf[get_index(ncol_new, irow, ncol_new - 1)] =
-        interp_0d(y1, y2, q1, q2, y);
+    // Now we have `Q_{l - 1}u - Π_{l - 1}Q_{l}u` on `old_nodes(l)` of `buffer`.
+    // Time to correct `Q_{l - 1}u` on `old_nodes(l)` of `v`.
+    axpy_on_level(hierarchy, static_cast<Real>(-1), buffer, v, l - 1);
+    // Now we have `Π_{l - 1}Q_{l}u` on `old_nodes(l)` of `v`. Since
+    // `(I - Π_{l - 1})Q_{l}u if on `new_nodes(l)` of `v`, it would be nice to
+    // interpolate and modify the values on `new_nodes(l)` of `v` in place.
+    // Unfortunately, `TensorProlongationAddition` requires the values on
+    // `new_nodes(l)` to be zero at the start. So, we use `buffer` again.
+    set_to_zero_on_level(hierarchy, buffer, l);
+    copy_on_level(hierarchy, v, buffer, l - 1);
+    {
+      const TensorProlongationAddition<N, Real> PA(hierarchy, l);
+      PA(buffer);
+    }
+    // Now we have `Π_{l - 1}Q_{l}u` on `nodes(l)` of `buffer`. We're almost
+    // ready to add to `(I - Π_{l - 1})Q_{l}u` on `new_nodes(l)` of `v`, but
+    // remember that `old_nodes(l)` of `v` still has `Π_{l - 1}Q_{l}u`. We zero
+    // those values in preparation.
+    set_to_zero_on_level(hierarchy, v, l - 1);
+    // Now we have `(I - Π_{l - 1})Q_{l}u` on `nodes(l)` of `v` and we're ready
+    // to add.
+    axpy_on_level(hierarchy, static_cast<Real>(1), buffer, v, l);
+    // Now we have `Q_{l}u` on `nodes(l)` of `v`.
   }
-
-  // last-row
-  resample_1d(&inbuf[get_index(ncol, nrow - 1, 0)],
-              &outbuf[get_index(ncol_new, nrow_new - 1, 0)], ncol, ncol_new);
-}
-
-template <typename Real>
-void resample_2d_inv2(const Real *inbuf, Real *outbuf, const int nrow,
-                      const int ncol, const int nrow_new, const int ncol_new) {
-  Real hx_o = 1.0 / Real(ncol - 1);
-  Real hx = 1.0 / Real(ncol_new - 1); // x-spacing
-  Real hx_ratio = (hx_o / hx);        // ratio of x-spacing resampled/orig
-
-  Real hy_o = 1.0 / Real(nrow - 1);
-  Real hy = 1.0 / Real(nrow_new - 1); // x-spacing
-  Real hy_ratio = (hy_o / hy);        // ratio of x-spacing resampled/orig
-
-  for (int irow = 0; irow < nrow_new - 1; ++irow) {
-    int i_bot = floor(irow / hy_ratio);
-    int i_top = i_bot + 1;
-
-    Real y = Real(irow) * hy;
-    Real y1 = Real(i_bot) * hy_o;
-    Real y2 = Real(i_top) * hy_o;
-
-    for (int jcol = 0; jcol < ncol_new - 1; ++jcol) {
-      int j_left = floor(jcol / hx_ratio);
-      int j_right = j_left + 1;
-
-      Real x = Real(jcol) * hx;
-      Real x1 = Real(j_left) * hx_o;
-      Real x2 = Real(j_right) * hx_o;
-
-      Real q11 = inbuf[get_index(ncol, i_bot, j_left)];
-      Real q12 = inbuf[get_index(ncol, i_top, j_left)];
-      Real q21 = inbuf[get_index(ncol, i_bot, j_right)];
-      Real q22 = inbuf[get_index(ncol, i_top, j_right)];
-
-      Real d11 = (std::pow(x1 - x, 2.0) + std::pow(y1 - y, 2.0));
-      Real d12 = (std::pow(x1 - x, 2.0) + std::pow(y2 - y, 2.0));
-      Real d21 = (std::pow(x2 - x, 2.0) + std::pow(y1 - y, 2.0));
-      Real d22 = (std::pow(x2 - x, 2.0) + std::pow(y2 - y, 2.0));
-
-      if (d11 == 0) {
-        outbuf[get_index(ncol_new, irow, jcol)] = q11;
-      } else if (d12 == 0) {
-        outbuf[get_index(ncol_new, irow, jcol)] = q12;
-      } else if (d21 == 0) {
-        outbuf[get_index(ncol_new, irow, jcol)] = q21;
-      } else if (d22 == 0) {
-        outbuf[get_index(ncol_new, irow, jcol)] = q22;
-      } else {
-        d11 = std::pow(d11, 1.5);
-        d12 = std::pow(d12, 1.5);
-        d21 = std::pow(d21, 1.5);
-        d22 = std::pow(d22, 1.5);
-
-        Real dsum = 1.0 / (d11) + 1.0 / (d12) + 1.0 / (d21) + 1.0 / (d22);
-        ////std::cout  <<  (q11/d11 + q12/d12 + q21/d21 + q22/d22)/dsum << "\n";
-        //              //std::cout  <<  dsum << "\n";
-
-        outbuf[get_index(ncol_new, irow, jcol)] =
-            (q11 / d11 + q12 / d12 + q21 / d21 + q22 / d22) / dsum;
-      }
-    }
-
-    // last column
-    Real q1 = inbuf[get_index(ncol, i_bot, ncol - 1)];
-    Real q2 = inbuf[get_index(ncol, i_top, ncol - 1)];
-
-    Real d1 = std::pow(y1 - y, 4.0);
-    Real d2 = std::pow(y2 - y, 4.0);
-
-    if (d1 == 0) {
-      outbuf[get_index(ncol_new, irow, ncol_new - 1)] = q1;
-    } else if (d2 == 0) {
-      outbuf[get_index(ncol_new, irow, ncol_new - 1)] = q2;
-    } else {
-      Real dsum = 1.0 / d1 + 1.0 / d2;
-      outbuf[get_index(ncol_new, irow, ncol_new - 1)] =
-          (q1 / d1 + q2 / d2) / dsum;
-    }
-  }
-
-  // last-row
-  resample_1d_inv2(&inbuf[get_index(ncol, nrow - 1, 0)],
-                   &outbuf[get_index(ncol_new, nrow_new - 1, 0)], ncol,
-                   ncol_new);
 }
 
 } // end namespace mgard

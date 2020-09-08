@@ -1,7 +1,7 @@
 #ifndef NORMS_HPP
 #define NORMS_HPP
 //!\file
-//!\brief Function space norms.
+//!\brief Unstructured mesh function space norms.
 
 #include "MeshHierarchy.hpp"
 #include "data.hpp"

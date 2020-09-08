@@ -7,6 +7,7 @@
 
 #include <iterator>
 #include <utility>
+#include <vector>
 
 namespace mgard {
 
@@ -98,12 +99,15 @@ template <typename It>
 bool operator!=(const Enumeration<It> &a, const Enumeration<It> &b);
 
 //! Iterator over an enumeration.
-template <typename It>
-class Enumeration<It>::iterator
-    : public std::iterator<
-          std::input_iterator_tag,
-          IndexedElement<typename std::iterator_traits<It>::value_type>> {
+template <typename It> class Enumeration<It>::iterator {
 public:
+  using T = typename std::iterator_traits<It>::value_type;
+  using iterator_category = std::input_iterator_tag;
+  using value_type = IndexedElement<T>;
+  using difference_type = std::ptrdiff_t;
+  using pointer = value_type *;
+  using reference = value_type &;
+
   //! Constructor.
   //!
   //!\param iterable Associated enumeration.
@@ -124,15 +128,8 @@ public:
   //! Postincrement.
   iterator operator++(int);
 
-  // Would like to return `value_type` from the dereference operator, but it
-  // seems like inheriting from a class template prevents `value_type` from
-  // being recognized as a type. See http://www.cs.technion.ac.il/users/yechiel/
-  // c++-faq/nondependent-name-lookup-members.html> and http://www.open-std.org/
-  // jtc1/sc22/wg21/docs/papers/2016/p0174r2.html#2.1>.
-
   //! Dereference.
-  IndexedElement<typename std::iterator_traits<It>::value_type>
-  operator*() const;
+  value_type operator*() const;
 
 private:
   //! Associated enumeration.
@@ -203,13 +200,16 @@ template <typename It, typename Jt>
 bool operator!=(const ZippedRange<It, Jt> &a, const ZippedRange<It, Jt> &b);
 
 //! Iterator over a zipped range.
-template <typename It, typename Jt>
-class ZippedRange<It, Jt>::iterator
-    : public std::iterator<
-          std::input_iterator_tag,
-          std::pair<typename std::iterator_traits<It>::value_type,
-                    typename std::iterator_traits<Jt>::value_type>> {
+template <typename It, typename Jt> class ZippedRange<It, Jt>::iterator {
 public:
+  using T = typename std::iterator_traits<It>::value_type;
+  using U = typename std::iterator_traits<Jt>::value_type;
+  using iterator_category = std::input_iterator_tag;
+  using value_type = std::pair<T, U>;
+  using difference_type = std::ptrdiff_t;
+  using pointer = value_type *;
+  using reference = value_type &;
+
   //! Constructor.
   //!
   //!\param iterable Associated zipped range.
@@ -234,9 +234,7 @@ public:
   iterator operator++(int);
 
   //! Dereference.
-  std::pair<typename std::iterator_traits<It>::value_type,
-            typename std::iterator_traits<Jt>::value_type>
-  operator*() const;
+  value_type operator*() const;
 
 private:
   //! Associated zipped range.
@@ -264,6 +262,173 @@ public:
 
   //! End of the slice.
   const It end_;
+};
+
+//! Collection of multiindices \f$\vec{\alpha}\f$ satisfying a bound of the form
+//! \f$\vec{\beta} \leq \vec{\alpha} < \vec{\gamma}\f$ (elementwise).
+template <std::size_t N> struct MultiindexRectangle {
+  //! Constructor.
+  //!
+  //!\param corner Lower bound (elementwise) for the multiindex set, the
+  //! 'lower left' vertex of the rectangle.
+  //!\param shape Dimensions of the multiindex set.
+  MultiindexRectangle(const std::array<std::size_t, N> &corner,
+                      const std::array<std::size_t, N> &shape);
+
+  //! Constructor
+  //!
+  //!\overload
+  //!
+  //! `corner` defaults to the zero multiindex.
+  MultiindexRectangle(const std::array<std::size_t, N> &shape);
+
+  // Forward declaration.
+  class iterator;
+
+  //! Return an iterator to the beginning of the indices with the given stride.
+  iterator begin(const std::size_t stride) const;
+
+  //! Return an iterator to the end of the indices with the given stride.
+  iterator end(const std::size_t stride) const;
+
+  //! Access the multiindices contained in the rectangle.
+  RangeSlice<iterator> indices(const std::size_t stride) const;
+
+  //! 'Lower left' vertex of the rectangle.
+  const std::array<std::size_t, N> corner;
+
+  //! Dimensions of the rectangle.
+  const std::array<std::size_t, N> shape;
+};
+
+//! Equality comparison.
+template <std::size_t N>
+bool operator==(const MultiindexRectangle<N> &a,
+                const MultiindexRectangle<N> &b);
+
+//! Inequality comparison.
+template <std::size_t N>
+bool operator!=(const MultiindexRectangle<N> &a,
+                const MultiindexRectangle<N> &b);
+
+//! Iterator over a rectangle of multiindices.
+template <std::size_t N> class MultiindexRectangle<N>::iterator {
+public:
+  using iterator_category = std::input_iterator_tag;
+  using value_type = std::array<std::size_t, N>;
+  using difference_type = std::ptrdiff_t;
+  using pointer = value_type *;
+  using reference = value_type &;
+
+  //! Constructor.
+  //!
+  //!\param rectangle Associated multiindex set.
+  //!\param stride Stride to use in iterating over the multiindex set.
+  //!\param indices Starting position in the multiindex set.
+  iterator(const MultiindexRectangle &rectangle, const std::size_t stride,
+           const std::array<std::size_t, N> &indices);
+
+  //! Equality comparison.
+  bool operator==(const iterator &other) const;
+
+  //! Inequality comparison.
+  bool operator!=(const iterator &other) const;
+
+  //! Preincrement.
+  iterator &operator++();
+
+  //! Postincrement.
+  iterator operator++(int);
+
+  //! Dereference;
+  value_type operator*() const;
+
+  //! Bounding rectangle.
+  const MultiindexRectangle &rectangle;
+
+  //! Stride with which to traverse the rectangle.
+  const std::size_t stride;
+
+private:
+  //! Current multiindex.
+  std::array<std::size_t, N> indices;
+};
+
+//! Mimic Python's `itertools.product`. Allow iteration over the Cartesian
+//! product of a collection of vectors.
+template <typename T, std::size_t N> struct CartesianProduct {
+public:
+  //! Constructor.
+  //!
+  //!\param factors Factors of the Cartesian product.
+  CartesianProduct(const std::array<std::vector<T>, N> &factors);
+
+  //! Prevent temporaries.
+  CartesianProduct(const std::array<std::vector<T>, N> &&factors) = delete;
+
+  // Forward declaration.
+  class iterator;
+
+  //! Return an iterator to the beginning of the product range.
+  iterator begin() const;
+
+  //! Return an iterator to the beginning of the product range.
+  iterator end() const;
+
+  //! Factors of the Cartesian product.
+  const std::array<std::vector<T>, N> &factors;
+
+  //! Multiindices of the product elements.
+  const MultiindexRectangle<N> multiindices;
+};
+
+//! Equality comparison.
+template <typename T, std::size_t N>
+bool operator==(const CartesianProduct<T, N> &a,
+                const CartesianProduct<T, N> &b);
+
+//! Inequality comparison.
+template <typename T, std::size_t N>
+bool operator!=(const CartesianProduct<T, N> &a,
+                const CartesianProduct<T, N> &b);
+
+//! Iterator over a Cartesian product.
+template <typename T, std::size_t N> class CartesianProduct<T, N>::iterator {
+public:
+  using iterator_category = std::input_iterator_tag;
+  using value_type = std::array<T, N>;
+  using difference_type = std::ptrdiff_t;
+  using pointer = value_type *;
+  using reference = value_type &;
+
+  //! Constructor.
+  //!
+  //!\param iterable Associated Cartesian product.
+  //!\param multiindex Multiindex of current element in product.
+  iterator(const CartesianProduct &iterable,
+           const typename MultiindexRectangle<N>::iterator inner);
+
+  //! Equality comparison.
+  bool operator==(const iterator &other) const;
+
+  //! Inequality comparison.
+  bool operator!=(const iterator &other) const;
+
+  //! Preincrement.
+  iterator &operator++();
+
+  //! Postincrement.
+  iterator operator++(int);
+
+  //! Dereference.
+  value_type operator*() const;
+
+  //! Associated Cartesian product.
+  const CartesianProduct &iterable;
+
+private:
+  //! Position in the multiindex range.
+  typename MultiindexRectangle<N>::iterator inner;
 };
 
 } // namespace mgard

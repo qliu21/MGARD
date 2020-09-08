@@ -1,5 +1,4 @@
 #include "mgard_mesh.hpp"
-#include "mgard_mesh.tpp"
 
 #include <cmath>
 
@@ -7,24 +6,24 @@
 
 namespace mgard {
 
-static int log2(int n) {
-  if (n <= 0) {
+static std::size_t log2(std::size_t n) {
+  if (!n) {
     throw std::domain_error("can only take logarithm of positive numbers");
   }
   int exp;
   for (exp = -1; n; ++exp, n >>= 1)
     ;
-  return exp;
+  return static_cast<std::size_t>(exp);
 }
 
-int nlevel_from_size(const int n) { return log2(n - 1); }
-
-int size_from_nlevel(const int n) { return (1 << n) + 1; }
-
-// TODO: wait for response to GitHub issue to see what this is supposed to be.
-bool is_2kplus1(const int n) {
-  return n == 1 || n == size_from_nlevel(nlevel_from_size(n));
+std::size_t nlevel_from_size(const std::size_t n) {
+  if (n == 0) {
+    throw std::domain_error("size must be nonzero");
+  }
+  return log2(n - 1);
 }
+
+std::size_t size_from_nlevel(const std::size_t n) { return (1 << n) + 1; }
 
 int get_index(const int ncol, const int i, const int j) { return ncol * i + j; }
 
@@ -40,10 +39,9 @@ int get_lindex(const int n, const int no, const int i) {
                      : no - 1);
 }
 
-template struct Dimensions2kPlus1<1>;
 
-template struct Dimensions2kPlus1<2>;
-
-template struct Dimensions2kPlus1<3>;
+std::size_t stride_from_index_difference(const std::size_t index_difference) {
+  return 1 << index_difference;
+}
 
 } // namespace mgard
