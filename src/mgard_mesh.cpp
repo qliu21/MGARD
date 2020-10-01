@@ -37,6 +37,7 @@ int get_lindex(const int n, const int no, const int i) {
                      : no - 1);
 }
 
+
 std::size_t stride_from_index_difference(const std::size_t index_difference) {
   return 1 << index_difference;
 }

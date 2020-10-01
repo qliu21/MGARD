@@ -21,6 +21,10 @@
 #include <numeric>
 #include <stdexcept>
 
+#ifdef MGARD_TIMING
+#include <chrono>
+#endif
+
 #include "mgard_compress.hpp"
 #include "mgard_mesh.hpp"
 #include "mgard_nuni.h"
@@ -342,7 +346,9 @@ unsigned char *refactor_qz_1D(int ncol, const Real *u, int &outsize, Real tol) {
 
   if (dims.is_2kplus1()) {
     // to be clean up.
-
+#ifdef MGARD_TIMING
+    auto start = std::chrono::high_resolution_clock::now();
+#endif
     tol /= dims.nlevel + 1;
 
     const int l_target = dims.nlevel - 1;
@@ -354,6 +360,11 @@ unsigned char *refactor_qz_1D(int ncol, const Real *u, int &outsize, Real tol) {
     int size_ratio = sizeof(Real) / sizeof(int);
     std::vector<int> qv(ncol + size_ratio);
 
+#ifdef MGARD_TIMING
+    auto stop = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+    std::cout << "Refactor Time = " << (double)duration.count()/1000000 << "\n";
+#endif
     quantize_interleave(hierarchy, v.data(), qv.data(), norm, tol);
 
     std::vector<unsigned char> out_data;
@@ -367,7 +378,9 @@ unsigned char *refactor_qz_1D(int ncol, const Real *u, int &outsize, Real tol) {
     tol /= dims.nlevel + 1;
 
     const int l_target = dims.nlevel - 1;
-
+#ifdef MGARD_TIMING
+    auto start = std::chrono::high_resolution_clock::now();
+#endif
     mgard_2d::mgard_gen::prep_1D(dims.rnded[0], dims.input[0], l_target,
                                  v.data(), work, coords_x, row_vec);
 
@@ -380,6 +393,11 @@ unsigned char *refactor_qz_1D(int ncol, const Real *u, int &outsize, Real tol) {
     const int size_ratio = sizeof(Real) / sizeof(int);
     std::vector<int> qv(ncol + size_ratio);
 
+#ifdef MGARD_TIMING
+    auto stop = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::seconds>(stop - start);
+    std::cout << "Refactor Time = " << duration.count() << "\n";
+#endif
     quantize_interleave(hierarchy, v.data(), qv.data(), norm, tol);
 
     std::vector<unsigned char> out_data;
