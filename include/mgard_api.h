@@ -32,6 +32,10 @@ public:
   RefactoredDataset(const TensorMeshHierarchy<N, Real> &hierarchy,
                     std::vector<Real *> data, std::vector<std::size_t> sizes);
 
+  RefactoredDataset(const TensorMeshHierarchy<N, Real> &hierarchy,
+                    std::vector<Real *> data, std::vector<std::size_t> sizes,
+                    std::vector<std::size_t> idx);
+
   //! Mesh hierarchy used in compressing the dataset.
   const TensorMeshHierarchy<N, Real> hierarchy;
 
@@ -41,12 +45,16 @@ public:
   //! Return the size in bytes of the compressed dataset.
   std::vector<std::size_t> sizes() const;
 
+  //! Return the size in bytes of the compressed dataset.
+  std::vector<std::size_t> index() const;
 private:
   //! Compressed dataset.
   std::vector<Real *> data_;
 
   //! Size of the compressed dataset in bytes.
   std::vector<std::size_t> sizes_;
+
+  std::vector<std::size_t> idx_;
 };
 
 
@@ -158,6 +166,10 @@ compress(const TensorMeshHierarchy<N, Real> &hierarchy, Real *const v,
 template <std::size_t N, typename Real>
 RefactoredDataset<N, Real>
 refactor(const TensorMeshHierarchy<N, Real> &hierarchy, Real *const v);
+
+template <std::size_t N, typename Real>
+RefactoredDataset<N, Real>
+refactor(const TensorMeshHierarchy<N, Real> &hierarchy, Real *const v, std::vector<std::size_t> sizes);
 
 //! Decompress a function on a tensor product grid.
 //!

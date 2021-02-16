@@ -30,6 +30,14 @@ RefactoredDataset<N, Real>::RefactoredDataset(
       data_(data), sizes_(sizes) {}
 
 template <std::size_t N, typename Real>
+RefactoredDataset<N, Real>::RefactoredDataset(
+    const TensorMeshHierarchy<N, Real> &hierarchy,
+    std::vector<Real *> data, std::vector<std::size_t> sizes,
+    std::vector<std::size_t> idx)
+    : hierarchy(hierarchy),
+      data_(data), sizes_(sizes), idx_(idx) {}
+
+template <std::size_t N, typename Real>
 std::vector<Real *> RefactoredDataset<N, Real>::data() const {
   return data_;
 }
@@ -37,6 +45,11 @@ std::vector<Real *> RefactoredDataset<N, Real>::data() const {
 template <std::size_t N, typename Real>
 std::vector<std::size_t> RefactoredDataset<N, Real>::sizes() const {
   return sizes_;
+}
+
+template <std::size_t N, typename Real>
+std::vector<std::size_t> RefactoredDataset<N, Real>::index() const {
+  return idx_;
 }
 
 template <std::size_t N, typename Real>
@@ -91,8 +104,6 @@ refactor(const TensorMeshHierarchy<N, Real> &hierarchy, Real *const v) {
   shuffle(hierarchy, v, u);
   decompose(hierarchy, u);
 
-  std::cout << "size = " << r.size();
-
   Real const *p = u;
 
   for (std::size_t l = 0; l <= hierarchy.L; ++l) {
@@ -107,6 +118,68 @@ refactor(const TensorMeshHierarchy<N, Real> &hierarchy, Real *const v) {
 
   return RefactoredDataset<N, Real>(hierarchy, r, sizes);
 }
+
+template <typename Real>
+struct coeff_idx_pair {
+  Real coeff;
+  std::size_t idx;
+  bool operator<(const coeff_idx_pair & rhs) const {
+    return std::abs(coeff) > std::abs(rhs.coeff);// sort by num1
+  }
+};
+
+template <std::size_t N, typename Real>
+RefactoredDataset<N, Real>
+refactor(const TensorMeshHierarchy<N, Real> &hierarchy, Real *const v,
+         std::vector<std::size_t> sizes) {
+  const std::size_t ndof = hierarchy.ndof();
+  std::size_t n = 0;
+
+  for (std::size_t i = 0; i < sizes.size(); i++) {
+    n += sizes.at(i);
+  }
+
+  if (n != ndof) {
+    throw std::runtime_error("Invalid sizes to refactor data into!");
+  }
+
+  std::vector<Real *> r;
+
+  Real *const u = static_cast<Real *>(std::malloc(ndof * sizeof(Real)));
+
+  shuffle(hierarchy, v, u);
+  decompose(hierarchy, u);
+
+  // TODO: to use pair instead.
+  coeff_idx_pair<Real> cip[ndof];
+  for (std::size_t i = 0; i < ndof; i++) {
+    cip[i].coeff = *(u + i);    
+    cip[i].idx = i;    
+  }
+
+  std::sort(cip, cip + ndof);
+ 
+  std::vector<size_t> idx(ndof);
+  for (std::size_t i = 0; i < ndof; i++) {
+    idx.at(i) = cip[i].idx;
+  }
+
+  std::size_t offset = 0;
+  for (std::size_t l = 0; l < sizes.size(); l++) {
+    r.push_back(static_cast<Real *>(std::malloc(sizes.at(l) * sizeof(Real))));
+    Real *p = r.at(l);
+    for (std::size_t i = 0; i < sizes.at(l); i++) {
+      *p++=cip[offset + i].coeff;
+    }
+
+    offset += sizes.at(l);
+  }
+
+  std::free(u);
+
+  return RefactoredDataset<N, Real>(hierarchy, r, sizes, idx);
+}
+
 
 template <std::size_t N, typename Real>
 CompressedDataset<N, Real>
@@ -146,15 +219,27 @@ recompose(const RefactoredDataset<N, Real> &refactored) {
   const std::size_t ndof = refactored.hierarchy.ndof();
   std::vector<Real *> r = refactored.data();
 
+  std::cout << "index size = " << refactored.index().size() << "\n";
   Real *const buffer = static_cast<Real *>(std::malloc(ndof * sizeof(Real)));
   Real zero_buffer[ndof] = {0};
   std::memcpy(buffer, zero_buffer, ndof * sizeof(Real)); 
   Real *p = buffer;
 
-  for (std::size_t l = 0; l < refactored.data().size(); ++l) {
-    std::size_t dndof = (l > 0) ? refactored.hierarchy.ndof(l) - refactored.hierarchy.ndof(l - 1) : refactored.hierarchy.ndof(0);
-    std::copy(r.at(l), r.at(l) + dndof, p);
-    p += dndof;
+  if (refactored.index().size() > 0) {
+    std::size_t offset = 0;
+    for (std::size_t l = 0; l < refactored.data().size(); ++l) {
+      for (std::size_t i = 0; i < refactored.sizes().at(l); ++i) {
+        buffer[refactored.index().at(offset + i)] = * (refactored.data().at(l) + i);
+      }
+
+      offset += refactored.sizes().at(l);
+    }
+  } else {
+    for (std::size_t l = 0; l < refactored.data().size(); ++l) {
+      std::size_t dndof = (l > 0) ? refactored.hierarchy.ndof(l) - refactored.hierarchy.ndof(l - 1) : refactored.hierarchy.ndof(0);
+      std::copy(r.at(l), r.at(l) + dndof, p);
+      p += dndof;
+    }
   }
 
   recompose(refactored.hierarchy, buffer);

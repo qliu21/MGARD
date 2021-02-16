@@ -47,7 +47,7 @@ Qntzr<N, Real, Int>::Qntzr(const TensorMeshHierarchy<N, Real> &hierarchy,
                            const Real s, const Real tolerance)
     : hierarchy(hierarchy), s(s), tolerance(tolerance),
       nodes(hierarchy, hierarchy.L),
-      supremum_quantizer(supremum_quantum(hierarchy, tolerance)) {}
+      supremum_quantizer(supremum_quantum(hierarchy, tolerance)) {std::cout << "Qntzr constructor\n";}
 
 template <std::size_t N, typename Real, typename Int>
 Int Qntzr<N, Real, Int>::operator()(const TensorNode<N> node,
